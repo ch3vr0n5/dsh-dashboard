@@ -2,6 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { installModelSelection, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
@@ -113,6 +114,9 @@ export class HarnessAgentRunner {
           })
       if (!resumed) await request.onSessionBound(sessionId)
       this.ctx.permissionPresets.set(handle.agent.session, this.config.permissionPreset)
+      await this.ctx.sessions.flush(handle.agent.session)
+      const taskWorkspace = await this.ctx.workspaceRegistry.create(workspacePath, `${issue.scopeRef} · ${issue.identifier}`)
+      await taskWorkspace.attachSession(sessionId)
       const completedTurns = sessionTurnCount(handle.agent.session.events)
       removeEventListener = this.ctx.on('session/event', (session, event) => {
         if (session.id !== sessionId) return

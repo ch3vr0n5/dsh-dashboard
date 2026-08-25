@@ -13,7 +13,7 @@ describe('HarnessAgentRunner card-owned sessions', () => {
     const handle = fakeHandle([], order)
     const create = vi.fn(async () => { order.push('create'); return handle })
     const resume = vi.fn()
-    const runner = new HarnessAgentRunner(context(create, resume), runnerConfig)
+    const runner = new HarnessAgentRunner(context(create, resume, order), runnerConfig)
 
     const result = await runner.run(request({
       onSessionBound: async () => { order.push('bound') },
@@ -22,7 +22,7 @@ describe('HarnessAgentRunner card-owned sessions', () => {
     expect(result.kind).toBe('inactive')
     expect(create).toHaveBeenCalledOnce()
     expect(resume).not.toHaveBeenCalled()
-    expect(order.slice(0, 4)).toEqual(['create', 'bound', 'followup', 'turn'])
+    expect(order.slice(0, 6)).toEqual(['create', 'bound', 'workspace', 'attached', 'followup', 'turn'])
   })
 
   it('resumes the bound session with a continuation instead of reseeding the task', async () => {
@@ -77,12 +77,14 @@ describe('HarnessAgentRunner card-owned sessions', () => {
   })
 })
 
-function context(create: ReturnType<typeof vi.fn>, resume: ReturnType<typeof vi.fn>): Context {
+function context(create: ReturnType<typeof vi.fn>, resume: ReturnType<typeof vi.fn>, order: string[] = []): Context {
+  const attachSession = vi.fn(async () => { order.push('attached') })
   return {
     agents: { create, resume },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
     permissionPresets: { resolve: vi.fn(), set: vi.fn() },
     sessions: { flush: vi.fn(async () => {}) },
+    workspaceRegistry: { create: vi.fn(async () => { order.push('workspace'); return { attachSession } }) },
     logger: { info: vi.fn(), warn: vi.fn() },
     get: () => undefined,
     on: () => () => {},

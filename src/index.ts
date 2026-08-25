@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-storage'
 import type {} from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { Config as ConfigSchema, type Config as PluginConfig } from './config.ts'
 import { ProjectCatalog } from './catalog/catalog.ts'
@@ -49,6 +50,7 @@ export const inject = [
   'sessions',
   'storageDomain',
   'tools',
+  'workspaceRegistry',
 ]
 
 /** Public plugin configuration schema. */
