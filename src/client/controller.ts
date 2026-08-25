@@ -1,7 +1,7 @@
 /** Small external stores for shell visibility and trusted-host RPC state. */
 
 import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-connection/client'
-import type { DashboardSnapshot, TaskTimelinePage } from '../runtime/types.ts'
+import type { DashboardSnapshot, IssueDetailView, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import {
@@ -25,6 +25,7 @@ export interface DashboardDataPort {
   setPaused(paused: boolean): Promise<void>
   stopIssue(key: string): Promise<void>
   loadTimeline(key: string, cursor?: string): Promise<TaskTimelinePage>
+  loadIssue(key: string): Promise<IssueDetailView>
   createTask(input: CreateTaskInput): Promise<void>
   updateTask(nativeRef: string, changes: UpdateTaskInput): Promise<void>
   deleteTask(nativeRef: string): Promise<void>
@@ -119,6 +120,15 @@ export class DashboardDataController implements DashboardDataPort {
     } finally {
       this.activeRequests -= 1
     }
+  }
+
+  async loadIssue(key: string): Promise<IssueDetailView> {
+    const result = await this.rpc.call('/dsh-dashboard', 'issue', { key }) as RpcResult<unknown>
+    if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    if (result.value === null || typeof result.value !== 'object' || !('issue' in result.value)) {
+      throw new DashboardRequestError('Dashboard issue response is malformed')
+    }
+    return result.value as IssueDetailView
   }
 
   async createTask(input: CreateTaskInput): Promise<void> {

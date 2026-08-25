@@ -1,6 +1,8 @@
 /** Cordis plugin configuration for the multi-project Dashboard foundation. */
 
 import z from '@deepseek-ai/schemastery'
+import type { LifecyclePolicy } from './lifecycle/types.ts'
+import { DEFAULT_LIFECYCLE_POLICY } from './lifecycle/policy.ts'
 
 export interface CurrentProjectConfig {
   /** Project root, resolved from the Harness process working directory. */
@@ -41,6 +43,8 @@ export interface Config {
   currentProject: CurrentProjectConfig
   agentProfile: AgentProfileConfig
   policyDefaults: PolicyDefaultsConfig
+  /** Safe global lifecycle defaults; projects opt in through WORKFLOW.md. */
+  lifecycleDefaults: LifecyclePolicy
   discovery: {
     /** Explicit roots seeded into the Catalog; every scanned candidate still requires confirmation. */
     roots: DiscoveryRootConfig[]
@@ -100,6 +104,7 @@ export const Config: z<Config> = z.object({
     maxTurns: 20,
     maxRetryBackoffMs: 300000,
   }),
+  lifecycleDefaults: z.any().default(DEFAULT_LIFECYCLE_POLICY) as z<LifecyclePolicy>,
   discovery: z.object({
     roots: z.array(z.object({
       path: z.string().required(),

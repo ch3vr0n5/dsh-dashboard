@@ -100,7 +100,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const providerConfigs = { linearConfig, githubConfig, jiraConfig, asanaConfig, gitlabConfig, localConfig }
   const runtime = new DashboardRuntimeCoordinator(ctx, catalog, {
     initialProject,
-    parseOptions: { defaults: config.policyDefaults, agentProfile },
+    parseOptions: { defaults: config.policyDefaults, lifecycleDefaults: config.lifecycleDefaults, agentProfile },
     createRuntime: (project, workflow) => {
       const sources = sourceRegistry.scope(project.id)
       const disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)

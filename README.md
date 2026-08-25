@@ -278,6 +278,12 @@ For a Git current project, the workspace is already a detached worktree of the s
 
 See [Security](./docs/security.md) and [Architecture](./docs/architecture.md) for the complete trust model and component boundaries.
 
+### Lifecycle model routing
+
+Projects can opt into explicit lifecycle roles in `WORKFLOW.md`. Each role gets a separate durable Harness session and permission preset; only one role is active for a card at a time. The Dashboard persists role, session, provider/model, reasoning effort, permission preset, token totals, runtime, and a compact handoff artifact. Planner/reviewer/escalation roles should be read-only; implementation and QA may use workspace-write. The next role receives only the compact handoff and current repository state, never an expensive full prior transcript. A role never merges or enables auto-merge.
+
+`policy.lifecycle.roles` is project configuration, so a deployment can use Claude, DeepSeek, or another configured provider without Dashboard code changes. `state_roles` selects the ordered pipeline per tracker state. Repeated failures insert `escalation` before unfinished writer work, and configured high-risk labels route review through that same high-reasoning role.
+
 ## Dashboard
 
 The plugin registers through Harness-native UI slots:

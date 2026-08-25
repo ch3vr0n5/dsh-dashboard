@@ -58,6 +58,27 @@ export interface WorkerSessionRecord {
   readonly updatedAt: string
 }
 
+/** Durable lifecycle role session; additive alongside the legacy card session binding. */
+export interface LifecycleSessionRecord {
+  readonly projectId: ProjectId
+  readonly issueKey: string
+  readonly role: import('../lifecycle/types.ts').LifecycleRole
+  readonly sessionId?: string
+  readonly status: 'running' | 'completed' | 'failed'
+  readonly issueRevision: string
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly permissionPreset: string
+  readonly startedAt: string
+  readonly updatedAt: string
+  readonly finishedAt?: string
+  readonly runtimeMs?: number
+  readonly tokens: import('../runtime/types.ts').TokenTotals
+  readonly handoff?: string
+  readonly error?: string
+}
+
 export interface DiscoveryRootRecord {
   readonly id: DiscoveryRootId
   readonly path: string

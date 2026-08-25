@@ -4,10 +4,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
-import type { WorkerSessionRecord } from '../catalog/types.ts'
+import type { LifecycleSessionRecord, WorkerSessionRecord } from '../catalog/types.ts'
 import type { TaskIssue } from '../domain/issue.ts'
 import { hasRequiredLabels, issueKey, normalizedState } from '../domain/issue.ts'
-import { AgentBlockedError, type HarnessAgentRunner } from '../agent/harness-runner.ts'
+import { AgentBlockedError, type AgentRunResult, type HarnessAgentRunner } from '../agent/harness-runner.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   BoardColumn,
@@ -27,6 +27,8 @@ import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { WorkspaceManager } from '../workspace/manager.ts'
 import { resolveWorkspaceRoot } from '../workspace/path-safety.ts'
 import { compareCandidates, failureRetryDelay, stateLimit } from './scheduling.ts'
+import { compactHandoff, DEFAULT_LIFECYCLE_POLICY, resolveLifecyclePipeline, rolePrompt } from '../lifecycle/policy.ts'
+import type { LifecycleRole } from '../lifecycle/types.ts'
 
 interface RunningRecord {
   issue: TaskIssue
@@ -286,7 +288,12 @@ export class DashboardOrchestrator {
     const issue = this.board.find(candidate => issueKey(candidate) === key)
     if (issue === undefined) return undefined
     const runtime = this.runtimeArchive.get(key)
-    return { issue, ...(runtime === undefined ? {} : { runtime }) }
+    const lifecycleSessions = this.catalog.lifecycleSessionsFor(this.config.projectId, key)
+    return {
+      issue,
+      ...(runtime === undefined ? {} : { runtime }),
+      ...(lifecycleSessions.length === 0 ? {} : { lifecycleSessions }),
+    }
   }
 
   issueTimeline(key: string, options: TaskTimelineOptions = {}): TaskTimelinePage | undefined {
@@ -488,44 +495,11 @@ export class DashboardOrchestrator {
     const key = issueKey(issue)
     let workspacePath: string | undefined
     let afterRunCompleted = false
-    const baselineTokens = record.runtime.tokens
-    const baselineTurnCount = record.runtime.turnCount
-    const baselineEvents = record.runtime.recentEvents
-    const mergeRuntime = (view: IssueRuntimeView): IssueRuntimeView => ({
-      ...view,
-      turnCount: baselineTurnCount + view.turnCount,
-      tokens: addTokens(baselineTokens, view.tokens),
-      recentEvents: [...view.recentEvents, ...baselineEvents].slice(0, 12),
-    })
     try {
       const prepared = await this.workspaces.prepare(issue, definition, abort.signal)
       workspacePath = prepared.path
       await this.workspaces.beforeRun(workspacePath, issue, definition, abort.signal)
-      const binding = this.catalog.workerSession(this.config.projectId, key)
-      if (binding?.sessionId !== undefined) {
-        await this.saveBinding(issue, binding.sessionId, 'running', undefined, binding.status === 'held' ? 0 : undefined)
-      }
-      const result = await this.runner.run({
-        issue,
-        source: this.sources.require(definition.tracker.kind),
-        workflow: definition,
-        workspacePath,
-        attempt,
-        ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
-        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, 0),
-        signal: abort.signal,
-        onRuntime: (view) => {
-          const merged = mergeRuntime(view)
-          this.captureTimelineEvent(key, merged.recentEvents[0])
-          record.runtime = merged
-          this.runtimeArchive.set(key, merged)
-        },
-      })
-      const mergedResult = mergeRuntime(result.runtime)
-      record.runtime = mergedResult
-      this.runtimeArchive.set(key, mergedResult)
-      const completedBinding = this.catalog.workerSession(this.config.projectId, key)
-      if (completedBinding?.sessionId !== undefined) await this.saveBinding(issue, completedBinding.sessionId, 'running', undefined, 0)
+      const result = await this.runLifecycle(record, workspacePath)
       if (result.kind === 'terminal') {
         await this.workspaces.afterRun(workspacePath, issue, definition)
         afterRunCompleted = true
@@ -571,6 +545,149 @@ export class DashboardOrchestrator {
       this.manualStops.delete(key)
       this.terminalStops.delete(key)
     }
+  }
+
+  /** Runs roles serially: at most one workspace-writing role can own a task at once. */
+  private async runLifecycle(record: RunningRecord, workspacePath: string): Promise<AgentRunResult> {
+    const { issue, workflow, attempt, abort } = record
+    const key = issueKey(issue)
+    const source = this.sources.require(workflow.tracker.kind)
+    const lifecycle = workflow.lifecycle ?? DEFAULT_LIFECYCLE_POLICY
+    const legacy = !lifecycle.enabled
+    const binding = this.catalog.workerSession(this.config.projectId, key)
+    if (legacy) {
+      const result = await this.runner.run({
+        issue, source, workflow, workspacePath, attempt,
+        ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
+        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, 0),
+        signal: abort.signal,
+        onRuntime: view => this.updateRuntime(record, view),
+      })
+      record.runtime = result.runtime
+      this.runtimeArchive.set(key, result.runtime)
+      return result
+    }
+
+    const failureCount = binding?.failureCount ?? 0
+    const roles = resolveLifecyclePipeline(lifecycle, issue.state.name, issue.labels, failureCount)
+    let aggregate = record.runtime
+    let handoff: string | undefined
+    let last: AgentRunResult | undefined
+    for (const role of roles) {
+      const existing = this.catalog.lifecycleSession(this.config.projectId, key, role)
+      if (existing?.status === 'completed' && existing.issueRevision === issueRevision(issue)) {
+        handoff = existing.handoff ?? handoff
+        continue
+      }
+      const route = lifecycle.roles[role]
+      const fallback = this.ctx.agentDefaultModel.currentSelection()
+      const provider = route.provider ?? fallback.provider
+      const model = route.model ?? fallback.model
+      const roleStartedAt = new Date().toISOString()
+      const current: LifecycleSessionRecord = {
+        projectId: this.config.projectId,
+        issueKey: key,
+        role,
+        ...(existing?.sessionId === undefined ? {} : { sessionId: existing.sessionId }),
+        status: 'running',
+        issueRevision: issueRevision(issue),
+        provider,
+        model,
+        ...(route.reasoning_effort === undefined ? {} : { reasoningEffort: route.reasoning_effort }),
+        permissionPreset: route.permission_preset,
+        startedAt: existing?.startedAt ?? roleStartedAt,
+        updatedAt: roleStartedAt,
+        tokens: existing?.tokens ?? emptyTokens(),
+      }
+      await this.catalog.saveLifecycleSession(current)
+      this.projectLifecycleRuntime(record, aggregate, role)
+      const baseline = aggregate
+      const merge = (view: IssueRuntimeView): IssueRuntimeView => ({
+        ...view,
+        turnCount: baseline.turnCount + view.turnCount,
+        tokens: addTokens(baseline.tokens, view.tokens),
+        recentEvents: [...view.recentEvents, ...baseline.recentEvents].slice(0, 12),
+        lifecycle: { activeRole: role, sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) },
+      })
+      try {
+        const result = await this.runner.run({
+          issue, source, workflow, workspacePath, attempt,
+          ...(existing?.sessionId === undefined ? {} : { sessionId: SessionId(existing.sessionId) }),
+          lifecycle: {
+            role,
+            provider,
+            model,
+            ...(route.reasoning_effort === undefined ? {} : { reasoningEffort: route.reasoning_effort }),
+            permissionPreset: route.permission_preset,
+            maxTurns: route.max_turns ?? (role === 'implementation' ? workflow.agent.max_turns : 2),
+            ...(handoff === undefined ? {} : { handoff }),
+            instruction: rolePrompt(role),
+          },
+          onSessionBound: async sessionId => {
+            await this.catalog.saveLifecycleSession({ ...current, sessionId, updatedAt: new Date().toISOString() })
+            await this.saveBinding(issue, sessionId, 'running', undefined, 0)
+          },
+          signal: abort.signal,
+          onRuntime: view => {
+            const merged = merge(view)
+            record.runtime = merged
+            this.runtimeArchive.set(key, merged)
+            this.captureTimelineEvent(key, merged.recentEvents[0])
+          },
+        })
+        aggregate = merge(result.runtime)
+        const finishedAt = new Date().toISOString()
+        handoff = compactHandoff(result.handoff) ?? handoff
+        const completed: LifecycleSessionRecord = {
+          ...current,
+          ...(existing?.sessionId === undefined ? { sessionId: String(result.runtime.sessionId) } : {}),
+          status: 'completed',
+          updatedAt: finishedAt,
+          finishedAt,
+          runtimeMs: Math.max(0, Date.parse(finishedAt) - Date.parse(roleStartedAt)),
+          tokens: result.runtime.tokens,
+          ...(handoff === undefined ? {} : { handoff }),
+        }
+        await this.catalog.saveLifecycleSession(completed)
+        aggregate = { ...aggregate, lifecycle: { sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) } }
+        record.runtime = aggregate
+        this.runtimeArchive.set(key, aggregate)
+        last = { ...result, runtime: aggregate, ...(handoff === undefined ? {} : { handoff }) }
+        if (result.kind === 'terminal' || result.kind === 'inactive') return last
+        // A role-local exhaustion is completion for planning/QA/review/escalation;
+        // implementation exhaustion remains the existing max-turn safety hold.
+        if (role === 'implementation' && result.kind === 'exhausted') return last
+      } catch (error) {
+        const failedAt = new Date().toISOString()
+        await this.catalog.saveLifecycleSession({
+          ...current,
+          status: 'failed',
+          updatedAt: failedAt,
+          finishedAt: failedAt,
+          runtimeMs: Math.max(0, Date.parse(failedAt) - Date.parse(roleStartedAt)),
+          tokens: aggregate.tokens,
+          error: String(error instanceof Error ? error.message : error).slice(0, 2000),
+        })
+        throw error
+      }
+    }
+    return last ?? { kind: 'inactive', issue, runtime: aggregate, ...(handoff === undefined ? {} : { handoff }) }
+  }
+
+  private updateRuntime(record: RunningRecord, view: IssueRuntimeView): void {
+    record.runtime = view
+    this.runtimeArchive.set(issueKey(record.issue), view)
+    this.captureTimelineEvent(issueKey(record.issue), view.recentEvents[0])
+  }
+
+  private projectLifecycleRuntime(record: RunningRecord, base: IssueRuntimeView, role: LifecycleRole): void {
+    const key = issueKey(record.issue)
+    const runtime: IssueRuntimeView = {
+      ...base,
+      lifecycle: { activeRole: role, sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) },
+    }
+    record.runtime = runtime
+    this.runtimeArchive.set(key, runtime)
   }
 
   private captureTimelineEvent(key: string, event: RuntimeEventView | undefined): void {

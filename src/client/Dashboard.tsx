@@ -20,6 +20,7 @@ import type {
   BoardColumn,
   DashboardSnapshot,
   IssueRuntimeView,
+  IssueDetailView,
   TaskTimelineCategory,
   TaskTimelineEvent,
   TaskTimelinePage,
@@ -125,6 +126,7 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onPause={paused => data.setPaused(paused)}
           onStop={key => data.stopIssue(key)}
           onLoadTimeline={(key, cursor) => data.loadTimeline(key, cursor)}
+          onLoadIssue={key => data.loadIssue(key)}
           onCreateTask={input => data.createTask(input)}
           onUpdateTask={(nativeRef, changes) => data.updateTask(nativeRef, changes)}
           onDeleteTask={nativeRef => data.deleteTask(nativeRef)}
@@ -151,6 +153,7 @@ export interface DashboardSurfaceProps {
   readonly onPause: (paused: boolean) => Promise<void>
   readonly onStop: (key: string) => Promise<void>
   readonly onLoadTimeline?: ((key: string, cursor?: string) => Promise<TaskTimelinePage>) | undefined
+  readonly onLoadIssue?: ((key: string) => Promise<IssueDetailView>) | undefined
   readonly onCreateTask: (input: CreateTaskInput) => Promise<void>
   readonly onUpdateTask: (nativeRef: string, changes: UpdateTaskInput) => Promise<void>
   readonly onDeleteTask: (nativeRef: string) => Promise<void>
@@ -187,6 +190,7 @@ export function DashboardSurface({
   onPause,
   onStop,
   onLoadTimeline,
+  onLoadIssue,
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
@@ -206,6 +210,7 @@ export function DashboardSurface({
   const [displayOpen, setDisplayOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter | undefined>()
+  const [selectedDetail, setSelectedDetail] = useState<IssueDetailView | undefined>()
   const [sourceFilter, setSourceFilter] = useState('all')
   const [taskEditor, setTaskEditor] = useState<TaskEditorState | undefined>()
   const [deleteTarget, setDeleteTarget] = useState<TaskIssue | undefined>()
@@ -226,6 +231,12 @@ export function DashboardSurface({
   const attention = useMemo(() => buildAttentionSummary(snapshot), [snapshot])
   const selectedIssue = selectedKey === undefined ? undefined : issueMap.get(selectedKey)
   const selectedRuntime = selectedKey === undefined ? undefined : runtimeMap.get(selectedKey)
+  useEffect(() => {
+    if (selectedKey === undefined || onLoadIssue === undefined) { setSelectedDetail(undefined); return }
+    let cancelled = false
+    void onLoadIssue(selectedKey).then(detail => { if (!cancelled) setSelectedDetail(detail) }).catch(() => { if (!cancelled) setSelectedDetail(undefined) })
+    return () => { cancelled = true }
+  }, [onLoadIssue, selectedKey])
   const global = snapshot?.selection.mode === 'global'
   const viewScope = global
     ? 'global'
@@ -480,6 +491,7 @@ export function DashboardSurface({
           key={issueKey(selectedIssue)}
           issue={selectedIssue}
           runtime={selectedRuntime}
+          lifecycleSessions={selectedDetail?.lifecycleSessions}
           onClose={() => setSelectedKey(undefined)}
           onRefresh={() => runAction('refresh', onRefresh, t('feedback.refreshed'))}
           refreshPending={isPending('refresh')}
@@ -1257,9 +1269,10 @@ type TimelineLoadState = {
   readonly error?: unknown
 }
 
-function IssueInspector({ issue, runtime, onClose, onRefresh, refreshPending, onStop, stopPending, canUpdate, canDelete, onEdit, onDelete, onOpenSession, onLoadTimeline, enterProjectPending, onEnterProject }: {
+function IssueInspector({ issue, runtime, lifecycleSessions, onClose, onRefresh, refreshPending, onStop, stopPending, canUpdate, canDelete, onEdit, onDelete, onOpenSession, onLoadTimeline, enterProjectPending, onEnterProject }: {
   readonly issue: TaskIssue
   readonly runtime?: IssueRuntimeView | undefined
+  readonly lifecycleSessions?: IssueDetailView['lifecycleSessions']
   readonly onClose: () => void
   readonly onRefresh: () => Promise<void>
   readonly refreshPending: boolean
@@ -1381,6 +1394,20 @@ function IssueInspector({ issue, runtime, onClose, onRefresh, refreshPending, on
               </div>
             ) : (
               <>
+                {lifecycleSessions === undefined && runtime.lifecycle === undefined ? null : (
+                  <InspectorSection title={t('inspector.lifecycle')}>
+                    <div className="dshd-lifecycle-sessions">
+                      {(lifecycleSessions ?? runtime.lifecycle?.sessions ?? []).map(session => (
+                        <div key={`${session.role}:${session.sessionId ?? session.startedAt}`} className="dshd-lifecycle-session">
+                          <strong>{session.role}</strong>
+                          <span>{session.status} · {session.provider}/{session.model}{session.reasoningEffort === undefined ? '' : ` · ${session.reasoningEffort}`}</span>
+                          <span>{session.permissionPreset} · {compactNumber(session.tokens.total, t)} {t('runtime.tokens')}</span>
+                          {session.sessionId === undefined ? null : <button type="button" className="dshd-link" onClick={() => onOpenSession(session.sessionId!)}>{t('inspector.openSession')} <ExternalIcon size={13} /></button>}
+                        </div>
+                      ))}
+                    </div>
+                  </InspectorSection>
+                )}
                 <InspectorSection title={t('inspector.runtime')}>
                   <InspectorRow label={t('inspector.session')}>
                     <span className="dshd-mono dshd-ellipsis">{runtime.sessionId ?? '—'}</span>

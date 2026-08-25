@@ -75,14 +75,27 @@ describe('HarnessAgentRunner card-owned sessions', () => {
       reason: 'dsh-dashboard orchestration cancelled: dsh-dashboard plugin disposed',
     })
   })
+
+  it('pins an explicit lifecycle role model and permission into its own session', async () => {
+    const create = vi.fn(async () => fakeHandle([]))
+    const permissions = { resolve: vi.fn(), set: vi.fn() }
+    const runner = new HarnessAgentRunner(context(create, vi.fn(), [], permissions), runnerConfig)
+
+    await runner.run(request({
+      lifecycle: { role: 'planning', provider: 'claude-code-worker', model: 'claude-opus-5', permissionPreset: 'read-only', maxTurns: 1 },
+    }))
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentOptions: { provider: 'claude-code-worker', model: 'claude-opus-5' } }))
+    expect(permissions.set).toHaveBeenCalledWith(expect.anything(), 'read-only')
+  })
 })
 
-function context(create: ReturnType<typeof vi.fn>, resume: ReturnType<typeof vi.fn>, order: string[] = []): Context {
+function context(create: ReturnType<typeof vi.fn>, resume: ReturnType<typeof vi.fn>, order: string[] = [], permissions = { resolve: vi.fn(), set: vi.fn() }): Context {
   const attachSession = vi.fn(async () => { order.push('attached') })
   return {
     agents: { create, resume },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
-    permissionPresets: { resolve: vi.fn(), set: vi.fn() },
+    permissionPresets: permissions,
     sessions: { flush: vi.fn(async () => {}) },
     workspaceRegistry: { create: vi.fn(async () => { order.push('workspace'); return { attachSession } }) },
     logger: { info: vi.fn(), warn: vi.fn() },

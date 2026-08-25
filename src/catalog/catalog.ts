@@ -29,6 +29,7 @@ import type {
   RepositoryRecord,
   RepositoryView,
   WorkerSessionRecord,
+  LifecycleSessionRecord,
 } from './types.ts'
 
 const DEFAULT_MAX_DEPTH = 4
@@ -60,6 +61,7 @@ export class ProjectCatalog {
   private roots: KvTable<DiscoveryRootId, DiscoveryRootRecord> | undefined
   private settings: KvTable<CatalogSettingId, ActiveProjectRecord> | undefined
   private workerSessions: KvTable<string, WorkerSessionRecord> | undefined
+  private lifecycleSessions: KvTable<string, LifecycleSessionRecord> | undefined
   private readonly candidateClaims = new Map<string, CandidateClaim>()
   private mutationTail: Promise<void> = Promise.resolve()
   private currentRoot?: string
@@ -83,6 +85,7 @@ export class ProjectCatalog {
     this.roots = domain.table('discovery_roots')
     this.settings = domain.table('settings')
     this.workerSessions = domain.table('worker_sessions')
+    this.lifecycleSessions = domain.table('lifecycle_sessions')
     try {
       const currentRoot = await canonicalDirectory(this.bootstrap.currentProject.root, this.cwd)
       this.currentRoot = currentRoot
@@ -130,6 +133,7 @@ export class ProjectCatalog {
     this.roots = undefined
     this.settings = undefined
     this.workerSessions = undefined
+    this.lifecycleSessions = undefined
     this.candidateClaims.clear()
     delete this.activeProjectId
     this.globalSelected = false
@@ -163,6 +167,24 @@ export class ProjectCatalog {
   async saveWorkerSession(record: WorkerSessionRecord): Promise<void> {
     await this.enqueueMutation(async () => {
       await this.requireWorkerSessions().put(workerSessionKey(record.projectId, record.issueKey), record)
+    })
+  }
+
+  lifecycleSessionsFor(projectId: ProjectId, issueKey: string): readonly LifecycleSessionRecord[] {
+    return [...this.requireLifecycleSessions().entries()].map(([, record]) => record)
+      .filter(record => record.projectId === projectId && record.issueKey === issueKey)
+      .map(record => ({ ...record, tokens: { ...record.tokens } }))
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.role.localeCompare(right.role, 'en-US'))
+  }
+
+  lifecycleSession(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): LifecycleSessionRecord | undefined {
+    const record = this.requireLifecycleSessions().get(lifecycleSessionKey(projectId, issueKey, role))
+    return record === undefined ? undefined : { ...record, tokens: { ...record.tokens } }
+  }
+
+  async saveLifecycleSession(record: LifecycleSessionRecord): Promise<void> {
+    await this.enqueueMutation(async () => {
+      await this.requireLifecycleSessions().put(lifecycleSessionKey(record.projectId, record.issueKey, record.role), record)
     })
   }
 
@@ -446,6 +468,11 @@ export class ProjectCatalog {
     return this.workerSessions
   }
 
+  private requireLifecycleSessions(): KvTable<string, LifecycleSessionRecord> {
+    if (this.lifecycleSessions === undefined) throw new Error('dsh-dashboard: Project Catalog is not started')
+    return this.lifecycleSessions
+  }
+
   private selectInMemory(project: ProjectRecord): void {
     this.globalSelected = false
     this.activeProjectId = project.id
@@ -465,6 +492,10 @@ export class ProjectCatalog {
 
 function workerSessionKey(projectId: ProjectId, issueKey: string): string {
   return `${projectId}:${issueKey}`
+}
+
+function lifecycleSessionKey(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): string {
+  return `${projectId}:${issueKey}:${role}`
 }
 
 interface ProjectInspection {
