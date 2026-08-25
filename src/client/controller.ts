@@ -42,6 +42,8 @@ export class DashboardUiController {
   private openValue = false
   private readonly listeners = new Set<() => void>()
 
+  constructor(private readonly announceOpen: () => void = () => {}) {}
+
   getSnapshot = (): boolean => this.openValue
 
   subscribe = (listener: () => void): (() => void) => {
@@ -55,6 +57,7 @@ export class DashboardUiController {
 
   private set(value: boolean): void {
     if (this.openValue === value) return
+    if (value) this.announceOpen()
     this.openValue = value
     for (const listener of [...this.listeners]) listener()
   }
