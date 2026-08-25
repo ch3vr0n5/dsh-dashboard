@@ -4,6 +4,7 @@ export type ProjectId = string
 export type RepositoryId = string
 export type DiscoveryRootId = string
 export type CatalogSettingId = 'active-project'
+export type WorkerSessionKey = string
 
 export type WorkspaceStrategy = 'worktree' | 'controlled-directory'
 export type ProjectRegistrationSource = 'current-workspace' | 'manual' | 'discovery'
@@ -40,6 +41,19 @@ export interface RepositoryRecord {
   readonly root: string
   readonly remoteUrl?: string
   readonly branch?: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Durable ownership of one Harness conversation by one Dashboard card. */
+export interface WorkerSessionRecord {
+  readonly projectId: ProjectId
+  readonly issueKey: string
+  readonly sessionId?: string
+  readonly status: 'running' | 'held'
+  readonly failureCount?: number
+  readonly issueRevision: string
+  readonly holdReason?: string
   readonly createdAt: string
   readonly updatedAt: string
 }

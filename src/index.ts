@@ -115,6 +115,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         runner,
         catalog,
         {
+          projectId: project.id,
           agentProfile: agentProfile.id,
           permissionPreset: agentProfile.permissionPreset,
           ...(agentProfile.agentPreset === undefined ? {} : { agentPreset: agentProfile.agentPreset }),

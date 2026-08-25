@@ -12,8 +12,9 @@ English | [简体中文](./README.zh-CN.md)
 - Supports Linear, GitHub Issues, Jira Cloud, Asana projects, GitLab project issues, and credential-free local tasks.
 - Applies deterministic priority ordering, required labels, global concurrency, and per-state concurrency limits.
 - Creates one persistent workspace per task and runs configurable `after_create`, `before_run`, `after_run`, and `before_remove` lifecycle hooks.
-- Runs through native Harness Agents and continues the same Harness session up to the configured turn limit.
-- Retries failed runs with bounded exponential backoff and rechecks source state before every dispatch.
+- Runs through native Harness Agents and durably binds one resumable conversation to each card across process restarts and review cycles.
+- Applies the configured turn limit cumulatively to that card-owned session. Explicit stops, blocked turns, permanent failures, and exhausted budgets are held until the card is revised.
+- Retries transient failures in the same session with bounded exponential backoff and rechecks source state before every dispatch.
 - Adds a **Dashboard** entry to the native Harness sidebar. Board, Runtime, Projects, and Configuration expose task state, session, workspace, turns, tokens, Agent events, retries, blockers, registered projects, and credential health.
 - Maintains a durable Project Catalog in Harness storage. Projects can be registered explicitly or discovered within bounded roots; scanned candidates are never registered without confirmation.
 - Models a Project separately from its Git Repository. Git projects use a worktree workspace strategy, while non-Git projects use controlled directories; autonomous task claims remain off.
@@ -222,7 +223,7 @@ Common fields:
 | `policy.hooks.timeout_ms` | Timeout applied independently to each lifecycle hook. |
 | `policy.agent.max_concurrent_agents` | Project Agent concurrency limit. |
 | `policy.agent.max_concurrent_agents_by_state` | Optional concurrency limits for individual source states. |
-| `policy.agent.max_turns` | Maximum turns continued in one Harness session. |
+| `policy.agent.max_turns` | Cumulative turn budget for the card-owned Harness session. |
 | `policy.agent.max_retry_backoff_ms` | Upper bound for retry backoff. |
 | `policy.dashboard.visible_states` | Board columns shown before the Hidden columns group. |
 
@@ -265,6 +266,8 @@ For a Git current project, the workspace is already a detached worktree of the s
 - Eligible tasks are ordered by priority, creation time, and identifier.
 - Linear `blocks` relations and Jira “is blocked by” links are projected as blockers when available.
 - Missing tasks stop running without being classified as terminal, so a transient query or provider change does not delete their workspace.
+- Review-state transitions finish through the worker's current turn instead of cancelling its session; terminal states still stop immediately and clean up safely.
+- A held worker resumes only after the source card revision changes, preserving the same session, workspace, branch, and task identity for feedback.
 - Workspace identifiers are normalized and containment-checked before filesystem mutation.
 - Workspace roots and task directories must be real directories, not symbolic links.
 - Deletion targets are resolved again after `before_remove`; cleanup is refused if the root or target changed while the hook ran.

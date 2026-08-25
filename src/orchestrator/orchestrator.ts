@@ -1,11 +1,14 @@
 /** Poll, reconcile, claim, dispatch, continue, retry, and observe normalized tasks. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
+import type { WorkerSessionRecord } from '../catalog/types.ts'
 import type { TaskIssue } from '../domain/issue.ts'
 import { hasRequiredLabels, issueKey, normalizedState } from '../domain/issue.ts'
-import type { HarnessAgentRunner } from '../agent/harness-runner.ts'
+import { AgentBlockedError, type HarnessAgentRunner } from '../agent/harness-runner.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   BoardColumn,
   DashboardSnapshot,
@@ -42,6 +45,7 @@ interface RetryRecord {
 }
 
 export interface OrchestratorConfig {
+  readonly projectId: string
   readonly agentProfile: string
   readonly permissionPreset: string
   readonly agentPreset?: string
@@ -69,6 +73,7 @@ export class DashboardOrchestrator {
   private active = true
   private readonly manualStops = new Set<string>()
   private readonly terminalStops = new Set<string>()
+  private readonly holds = new Map<string, { readonly issueRevision: string; readonly reason: string }>()
 
   constructor(
     private readonly ctx: Context,
@@ -169,7 +174,12 @@ export class DashboardOrchestrator {
   stopIssue(key: string): boolean {
     const record = this.running.get(key)
     if (record === undefined) return false
+    const currentIssue = this.board.find(issue => issueKey(issue) === key) ?? record.issue
+    record.issue = currentIssue
     this.manualStops.add(key)
+    void this.hold(currentIssue, 'Agent explicitly stopped from Dashboard').catch(error => {
+      this.ctx.logger.warn('dsh-dashboard: failed to persist explicit stop for %s: %s', currentIssue.identifier, String(error))
+    })
     record.abort.abort(new Error('agent stopped from Dashboard'))
     return true
   }
@@ -326,8 +336,12 @@ export class DashboardOrchestrator {
         this.terminalStops.add(key)
         record.abort.abort(new Error('issue reached a terminal state'))
       } else if (!active.has(normalizedState(current.state.name))) {
-        this.manualStops.add(key)
-        record.abort.abort(new Error('issue left an active state'))
+        // The worker may own this transition (for example Working -> User Test).
+        // Let its current turn close and verify the new state itself so the
+        // durable session ends completed rather than as orchestration-cancelled.
+        record.issue = current
+        record.runtime = { ...record.runtime, state: current.state.name, updatedAt: new Date().toISOString() }
+        this.runtimeArchive.set(key, record.runtime)
       } else {
         record.issue = current
         if (record.runtime.state !== current.state.name) {
@@ -356,7 +370,25 @@ export class DashboardOrchestrator {
     for (const issue of board) {
       const key = issueKey(issue)
       if (this.running.has(key) || this.retries.has(key)) continue
-      if (active.has(normalizedState(issue.state.name)) && !issue.dispatchable) {
+      const hold = this.currentHold(issue)
+      if (hold !== undefined) {
+        const previous = this.runtimeArchive.get(key)
+        const unchanged = previous?.phase === 'blocked' && previous.blocked?.reason === hold.reason
+        const timestamp = unchanged ? previous.updatedAt : new Date().toISOString()
+        this.runtimeArchive.set(key, {
+          key,
+          identifier: issue.identifier,
+          phase: 'blocked',
+          state: issue.state.name,
+          turnCount: previous?.turnCount ?? 0,
+          phaseChangedAt: timestamp,
+          updatedAt: timestamp,
+          workerHost: this.config.workerHost,
+          tokens: previous?.tokens ?? emptyTokens(),
+          blocked: { reason: hold.reason },
+          recentEvents: previous?.recentEvents ?? [],
+        })
+      } else if (active.has(normalizedState(issue.state.name)) && !issue.dispatchable) {
         const previous = this.runtimeArchive.get(key)
         const reason = blockerReason(issue)
         const unchanged = previous?.phase === 'blocked' && previous.blocked?.reason === reason
@@ -400,6 +432,7 @@ export class DashboardOrchestrator {
       .filter(issue => !terminal.has(normalizedState(issue.state.name)))
       .filter(issue => issue.dispatchable)
       .filter(issue => hasRequiredLabels(issue, definition.tracker.required_labels))
+      .filter(issue => this.currentHold(issue) === undefined)
       .filter(issue => !this.running.has(issueKey(issue)))
       .filter((issue) => {
         const retry = this.retries.get(issueKey(issue))
@@ -414,7 +447,8 @@ export class DashboardOrchestrator {
       if (limit !== undefined && (stateCounts.get(state) ?? 0) >= limit) continue
       const retry = this.retries.get(issueKey(issue))
       if (retry !== undefined) this.retries.delete(issueKey(issue))
-      this.launch(issue, definition, retry?.attempt ?? 0)
+      const binding = this.catalog.workerSession(this.config.projectId, issueKey(issue))
+      this.launch(issue, definition, retry?.attempt ?? (binding?.status === 'running' ? binding.failureCount ?? 0 : 0))
       stateCounts.set(state, (stateCounts.get(state) ?? 0) + 1)
     }
   }
@@ -424,6 +458,7 @@ export class DashboardOrchestrator {
     const abort = new AbortController()
     const now = new Date().toISOString()
     const previous = this.runtimeArchive.get(key)
+    const binding = this.catalog.workerSession(this.config.projectId, key)
     const runtime: IssueRuntimeView = {
       key,
       identifier: issue.identifier,
@@ -434,6 +469,7 @@ export class DashboardOrchestrator {
       phaseChangedAt: now,
       updatedAt: now,
       workerHost: this.config.workerHost,
+      ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
       tokens: previous?.tokens ?? emptyTokens(),
       recentEvents: previous?.recentEvents ?? [],
     }
@@ -465,12 +501,18 @@ export class DashboardOrchestrator {
       const prepared = await this.workspaces.prepare(issue, definition, abort.signal)
       workspacePath = prepared.path
       await this.workspaces.beforeRun(workspacePath, issue, definition, abort.signal)
+      const binding = this.catalog.workerSession(this.config.projectId, key)
+      if (binding?.sessionId !== undefined) {
+        await this.saveBinding(issue, binding.sessionId, 'running', undefined, binding.status === 'held' ? 0 : undefined)
+      }
       const result = await this.runner.run({
         issue,
         source: this.sources.require(definition.tracker.kind),
         workflow: definition,
         workspacePath,
         attempt,
+        ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
+        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, 0),
         signal: abort.signal,
         onRuntime: (view) => {
           const merged = mergeRuntime(view)
@@ -482,13 +524,15 @@ export class DashboardOrchestrator {
       const mergedResult = mergeRuntime(result.runtime)
       record.runtime = mergedResult
       this.runtimeArchive.set(key, mergedResult)
+      const completedBinding = this.catalog.workerSession(this.config.projectId, key)
+      if (completedBinding?.sessionId !== undefined) await this.saveBinding(issue, completedBinding.sessionId, 'running', undefined, 0)
       if (result.kind === 'terminal') {
         await this.workspaces.afterRun(workspacePath, issue, definition)
         afterRunCompleted = true
         await this.workspaces.remove(result.issue ?? issue, definition)
         this.runtimeArchive.delete(key)
-      } else if (result.kind === 'active') {
-        this.scheduleRetry(record, attempt + 1, 1000, 'agent reached max_turns while the issue remained active')
+      } else if (result.kind === 'exhausted') {
+        await this.hold(record.issue, `Agent reached the cumulative max_turns limit (${definition.agent.max_turns}); revise the card to resume`)
       } else {
         this.runtimeArchive.delete(key)
       }
@@ -504,12 +548,23 @@ export class DashboardOrchestrator {
           this.ctx.logger.warn('dsh-dashboard: terminal workspace cleanup failed for %s: %s', record.issue.identifier, String(removeError))
         })
         this.runtimeArchive.delete(key)
-      } else if (manuallyStopped || this.stopped) {
-        this.runtimeArchive.delete(key)
+      } else if (manuallyStopped) {
+        // stopIssue persisted a revision-bound hold before cancellation.
+      } else if (this.stopped) {
+        // Keep the binding runnable: a replacement plugin process resumes it.
       } else {
         const nextAttempt = attempt + 1
-        const delay = failureRetryDelay(nextAttempt, definition.agent.max_retry_backoff_ms)
-        this.scheduleRetry(record, nextAttempt, delay, error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+        if (error instanceof AgentBlockedError || isPermanentFailure(error) || nextAttempt >= 5) {
+          await this.hold(record.issue, error instanceof AgentBlockedError
+            ? message
+            : `${message} (held after ${nextAttempt} failed attempt${nextAttempt === 1 ? '' : 's'}; revise the card to resume)`)
+        } else {
+          const retryBinding = this.catalog.workerSession(this.config.projectId, key)
+          if (retryBinding?.sessionId !== undefined) await this.saveBinding(record.issue, retryBinding.sessionId, 'running', undefined, nextAttempt)
+          const delay = failureRetryDelay(nextAttempt, definition.agent.max_retry_backoff_ms)
+          this.scheduleRetry(record, nextAttempt, delay, message)
+        }
       }
     } finally {
       if (workspacePath !== undefined && !afterRunCompleted) await this.workspaces.afterRun(workspacePath, issue, definition)
@@ -554,6 +609,64 @@ export class DashboardOrchestrator {
     this.runtimeArchive.set(key, view)
     this.captureTimelineEvent(key, this.schedulerTimelineEvent('scheduler.retrying', 'Agent retrying', view.updatedAt, error))
     this.ctx.logger.warn('dsh-dashboard: retrying %s in %dms (attempt %d): %s', record.issue.identifier, delayMs, attempt, error)
+  }
+
+  private currentHold(issue: TaskIssue): { readonly issueRevision: string; readonly reason: string } | undefined {
+    const key = issueKey(issue)
+    const revision = issueRevision(issue)
+    const memory = this.holds.get(key)
+    if (memory !== undefined) {
+      if (memory.issueRevision === revision) return memory
+      this.holds.delete(key)
+    }
+    const persisted = this.catalog.workerSession(this.config.projectId, key)
+    if (persisted?.status !== 'held' || persisted.issueRevision !== revision || persisted.holdReason === undefined) return undefined
+    const hold = { issueRevision: persisted.issueRevision, reason: persisted.holdReason }
+    this.holds.set(key, hold)
+    return hold
+  }
+
+  private async hold(issue: TaskIssue, reason: string): Promise<void> {
+    const key = issueKey(issue)
+    const revision = issueRevision(issue)
+    this.holds.set(key, { issueRevision: revision, reason })
+    this.retries.delete(key)
+    const binding = this.catalog.workerSession(this.config.projectId, key)
+    await this.saveBinding(issue, binding?.sessionId, 'held', reason)
+    const previous = this.runtimeArchive.get(key)
+    if (previous !== undefined) {
+      const timestamp = new Date().toISOString()
+      this.runtimeArchive.set(key, {
+        ...previous,
+        phase: 'blocked',
+        state: issue.state.name,
+        phaseChangedAt: timestamp,
+        updatedAt: timestamp,
+        blocked: { reason },
+      })
+    }
+  }
+
+  private async saveBinding(
+    issue: TaskIssue,
+    sessionId: string | undefined,
+    status: WorkerSessionRecord['status'],
+    holdReason?: string,
+    failureCount?: number,
+  ): Promise<void> {
+    const existing = this.catalog.workerSession(this.config.projectId, issueKey(issue))
+    const timestamp = new Date().toISOString()
+    await this.catalog.saveWorkerSession({
+      projectId: this.config.projectId,
+      issueKey: issueKey(issue),
+      ...(sessionId === undefined ? {} : { sessionId }),
+      status,
+      failureCount: failureCount ?? existing?.failureCount ?? 0,
+      issueRevision: issueRevision(issue),
+      ...(holdReason === undefined ? {} : { holdReason }),
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    })
   }
 
   private scheduleNext(): void {
@@ -632,6 +745,22 @@ function blockerReason(issue: TaskIssue): string {
     return `Blocked by ${issue.blockedBy.map(item => item.identifier ?? item.nativeRef ?? 'another issue').join(', ')}`
   }
   return 'Not dispatchable under the current tracker routing policy'
+}
+
+function issueRevision(issue: TaskIssue): string {
+  const value = issue.updatedAt ?? JSON.stringify({
+    state: normalizedState(issue.state.name),
+    title: issue.title,
+    description: issue.description ?? null,
+    priority: issue.priority ?? null,
+  })
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function isPermanentFailure(error: unknown): boolean {
+  if (error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError) return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:authentication|authorization|permission denied|invalid (?:config|configuration|workflow)|not configured|unsupported|not found)/iu.test(message)
 }
 
 function runtimeOrder(left: IssueRuntimeView, right: IssueRuntimeView): number {

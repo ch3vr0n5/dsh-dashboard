@@ -32,17 +32,21 @@ export interface AgentRunRequest {
   readonly workflow: WorkflowDefinition
   readonly workspacePath: string
   readonly attempt: number
+  /** Existing card-owned conversation. Absent only for the card's first worker. */
+  readonly sessionId?: SessionId
+  /** Persist a newly-created conversation before any task prompt is submitted. */
+  readonly onSessionBound: (sessionId: SessionId) => Promise<void>
   readonly signal: AbortSignal
   readonly onRuntime: (view: IssueRuntimeView) => void
 }
 
 export interface AgentRunResult {
-  readonly kind: 'terminal' | 'active' | 'inactive'
+  readonly kind: 'terminal' | 'exhausted' | 'inactive'
   readonly issue?: TaskIssue
   readonly runtime: IssueRuntimeView
 }
 
-/** Creates one Harness Agent per worker interval and continues in the same session up to max_turns. */
+/** Creates or resumes the card-owned Harness Agent and enforces a cumulative turn budget. */
 export class HarnessAgentRunner {
   constructor(private readonly ctx: Context, private readonly config: HarnessRunnerConfig) {
     ctx.permissionPresets.resolve(config.permissionPreset)
@@ -51,7 +55,8 @@ export class HarnessAgentRunner {
   async run(request: AgentRunRequest): Promise<AgentRunResult> {
     const { issue, source, workflow, workspacePath, attempt, signal, onRuntime } = request
     const startedAt = new Date().toISOString()
-    const sessionId = SessionId(`dsh-dashboard-${randomUUID()}`)
+    const sessionId = request.sessionId ?? SessionId(`dsh-dashboard-${randomUUID()}`)
+    const resumed = request.sessionId !== undefined
     const selection = this.ctx.agentDefaultModel.currentSelection()
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     const presets = this.ctx.get('agentPresets')
@@ -79,35 +84,46 @@ export class HarnessAgentRunner {
     let handle: AgentHandle | undefined
     let removeEventListener: (() => void) | undefined
     const onAbort = (): void => {
-      handle?.agent.cancel({ kind: 'hook', reason: 'dsh-dashboard orchestration cancelled' })
+      const reason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? 'unknown lifecycle reason')
+      handle?.agent.cancel({ kind: 'hook', reason: `dsh-dashboard orchestration cancelled: ${reason}` })
     }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      handle = await this.ctx.agents.create({
-        sessionId,
-        meta: {
-          cwd: workspacePath,
-          ...(resolvedPreset === undefined ? {} : { agentPreset: resolvedPreset.id }),
-        },
-        agentOptions: { provider: selection.provider, model: selection.model },
-        signal,
-        setup: async (agentCtx) => {
-          if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
-          installModelSelection(agentCtx, selected)
-          this.installTaskSourceTool(agentCtx, source)
-        },
-      })
+      const setup = async (agentCtx: Context): Promise<void> => {
+        if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
+        installModelSelection(agentCtx, selected)
+        this.installTaskSourceTool(agentCtx, source)
+      }
+      handle = resumed
+        ? await this.ctx.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions: { provider: selection.provider, model: selection.model },
+            signal,
+            setup,
+          })
+        : await this.ctx.agents.create({
+            sessionId,
+            meta: {
+              cwd: workspacePath,
+              ...(resolvedPreset === undefined ? {} : { agentPreset: resolvedPreset.id }),
+            },
+            agentOptions: { provider: selection.provider, model: selection.model },
+            signal,
+            setup,
+          })
+      if (!resumed) await request.onSessionBound(sessionId)
       this.ctx.permissionPresets.set(handle.agent.session, this.config.permissionPreset)
+      const completedTurns = sessionTurnCount(handle.agent.session.events)
       removeEventListener = this.ctx.on('session/event', (session, event) => {
         if (session.id !== sessionId) return
-        runtime = projectEvent(runtime, event)
+        runtime = projectEvent(runtime, event, completedTurns)
         onRuntime(runtime)
       })
       await handle.agent.whenIdle()
 
-      for (let turn = 1; turn <= workflow.agent.max_turns; turn += 1) {
+      for (let turn = completedTurns + 1; turn <= workflow.agent.max_turns; turn += 1) {
         if (signal.aborted) throw signal.reason
-        const prompt = turn === 1
+        const prompt = turn === 1 && !resumed
           ? await renderIssuePrompt(workflow.prompt, { issue, attempt })
           : continuationPrompt(turn, workflow.agent.max_turns)
         this.ctx.logger.info(
@@ -150,7 +166,7 @@ export class HarnessAgentRunner {
         onRuntime(runtime)
         if (turn < workflow.agent.max_turns) await abortableDelay(1000, signal)
       }
-      return { kind: 'active', issue, runtime }
+      return { kind: 'exhausted', issue, runtime }
     } finally {
       signal.removeEventListener('abort', onAbort)
       removeEventListener?.()
@@ -248,7 +264,7 @@ export class AgentBlockedError extends Error {
   }
 }
 
-function projectEvent(current: IssueRuntimeView, event: SessionEvent): IssueRuntimeView {
+function projectEvent(current: IssueRuntimeView, event: SessionEvent, turnOffset = 0): IssueRuntimeView {
   const at = new Date(event.time).toISOString()
   let tokens = current.tokens
   let lastMessage = current.lastMessage
@@ -258,7 +274,7 @@ function projectEvent(current: IssueRuntimeView, event: SessionEvent): IssueRunt
   if (event.type === 'turn/start') {
     title = 'Turn started'
     detail = `Turn ${event.data.turn} started`
-    turnCount = Math.max(turnCount, event.data.turn)
+    turnCount = Math.max(turnCount, event.data.turn - turnOffset)
   } else if (event.type === 'assistant/message') {
     title = 'Assistant message'
     const text = event.data.message.content
@@ -317,6 +333,10 @@ function addUsage(current: TokenTotals, usage: TokenUsage): TokenTotals {
 
 function lastTurnEnd(events: readonly SessionEvent[], firstSeq: number): SessionEvent<'turn/end'> | undefined {
   return events.filter((event): event is SessionEvent<'turn/end'> => event.seq >= firstSeq && event.type === 'turn/end').at(-1)
+}
+
+function sessionTurnCount(events: readonly SessionEvent[]): number {
+  return events.reduce((maximum, event) => event.type === 'turn/start' ? Math.max(maximum, event.data.turn) : maximum, 0)
 }
 
 function continuationPrompt(turn: number, maxTurns: number): string {

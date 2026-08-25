@@ -11,6 +11,8 @@ import type {
   ProjectRecord,
   RepositoryId,
   RepositoryRecord,
+  WorkerSessionKey,
+  WorkerSessionRecord,
 } from './types.ts'
 
 const id = z.uuid()
@@ -61,15 +63,30 @@ export const activeProjectRecordSchema = z.union([
   }).strict(),
 ]) as z.ZodType<ActiveProjectRecord>
 
+export const workerSessionRecordSchema = z.object({
+  // The unregistered current workspace uses the stable synthetic
+  // "current-workspace" id; registered Catalog projects use UUIDs.
+  projectId: nonBlank,
+  issueKey: nonBlank,
+  sessionId: nonBlank.optional(),
+  status: z.union([z.literal('running'), z.literal('held')]),
+  failureCount: z.number().int().nonnegative().optional(),
+  issueRevision: nonBlank,
+  holdReason: nonBlank.optional(),
+  createdAt: timestamp,
+  updatedAt: timestamp,
+}).strict() as z.ZodType<WorkerSessionRecord>
+
 export const dashboardCatalogDomainSpec = defineDomain({
   name: 'dsh_dashboard',
-  // The settings table is additive: storage-domain initializes an absent
-  // declared table as empty, so existing v0 Catalog media need no migration.
+  // Additive tables are initialized empty by storage-domain, so existing v0
+  // Catalog media need no migration.
   version: 0,
   tables: {
     projects: domainTable<ProjectId, ProjectRecord>(projectRecordSchema),
     repositories: domainTable<RepositoryId, RepositoryRecord>(repositoryRecordSchema),
     discovery_roots: domainTable<DiscoveryRootId, DiscoveryRootRecord>(discoveryRootRecordSchema),
     settings: domainTable<CatalogSettingId, ActiveProjectRecord>(activeProjectRecordSchema),
+    worker_sessions: domainTable<WorkerSessionKey, WorkerSessionRecord>(workerSessionRecordSchema),
   },
 })
