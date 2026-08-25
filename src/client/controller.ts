@@ -42,7 +42,10 @@ export class DashboardUiController {
   private openValue = false
   private readonly listeners = new Set<() => void>()
 
-  constructor(private readonly announceOpen: () => void = () => {}) {}
+  constructor(
+    private readonly announceOpen: () => void = () => {},
+    private readonly announceClose: () => void = () => {},
+  ) {}
 
   getSnapshot = (): boolean => this.openValue
 
@@ -58,6 +61,7 @@ export class DashboardUiController {
   private set(value: boolean): void {
     if (this.openValue === value) return
     if (value) this.announceOpen()
+    else this.announceClose()
     this.openValue = value
     for (const listener of [...this.listeners]) listener()
   }

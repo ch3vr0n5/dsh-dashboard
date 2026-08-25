@@ -10,7 +10,7 @@ import { DashboardFooterAction, DashboardOverlay } from './Dashboard.tsx'
 import { DashboardDataController, DashboardUiController } from './controller.ts'
 import { en, DASHBOARD_LOCALE_NS, zh } from './locales.ts'
 import { installDashboardStyles } from './styles.ts'
-import { announcePluginSurfaceOpen, closeWhenOtherPluginSurfaceOpens } from './surface-navigation.ts'
+import { installPluginSurfaceNavigation, type PluginSurfaceNavigation } from './surface-navigation.ts'
 
 export { DashboardSurface } from './Dashboard.tsx'
 export type { DashboardSurfaceProps } from './Dashboard.tsx'
@@ -28,14 +28,15 @@ export function apply(ctx: ClientContext): void {
   // These explicit client-face casts keep the browser entry on the wire API.
   const connection = ctx.connection as unknown as ConnectionHandle
   const sessions = ctx.sessions as unknown as ISessions
-  const ui = new DashboardUiController(() => { announcePluginSurfaceOpen('dsh-dashboard') })
+  let navigation: PluginSurfaceNavigation | undefined
+  const ui = new DashboardUiController(() => { navigation?.open() }, () => { navigation?.close() })
   const data = new DashboardDataController(connection.rpc)
   ctx.effect(() => ctx.locale.register(DASHBOARD_LOCALE_NS, { zh, en }), 'dsh-dashboard: dictionaries')
   ctx.effect(() => installDashboardStyles(), 'dsh-dashboard: styles')
-  ctx.effect(
-    () => closeWhenOtherPluginSurfaceOpens('dsh-dashboard', ui.close),
-    'dsh-dashboard: exclusive plugin surface',
-  )
+  ctx.effect(() => {
+    navigation = installPluginSurfaceNavigation({ id: 'dsh-dashboard', isOpen: ui.getSnapshot, close: ui.close }, sessions)
+    return () => { navigation?.dispose(); navigation = undefined }
+  }, 'dsh-dashboard: plugin surface navigation')
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
