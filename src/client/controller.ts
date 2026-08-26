@@ -4,6 +4,7 @@ import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-con
 import type { DashboardSnapshot, IssueDetailView, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
+import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 import {
   DashboardRequestError,
   dashboardProtocolError,
@@ -28,6 +29,7 @@ export interface DashboardDataPort {
   loadIssue(key: string): Promise<IssueDetailView>
   createTask(input: CreateTaskInput): Promise<void>
   updateTask(nativeRef: string, changes: UpdateTaskInput): Promise<void>
+  recordUserTestEvidence(nativeRef: string, evidence: UserTestEvidencePatch): Promise<void>
   deleteTask(nativeRef: string): Promise<void>
   switchProject(projectId: string): Promise<void>
   switchGlobal(): Promise<void>
@@ -137,6 +139,10 @@ export class DashboardDataController implements DashboardDataPort {
 
   async updateTask(nativeRef: string, changes: UpdateTaskInput): Promise<void> {
     await this.call('updateTask', { nativeRef, changes }, false, true)
+  }
+
+  async recordUserTestEvidence(nativeRef: string, evidence: UserTestEvidencePatch): Promise<void> {
+    await this.call('recordUserTestEvidence', { nativeRef, evidence }, false, true)
   }
 
   async deleteTask(nativeRef: string): Promise<void> {

@@ -21,6 +21,7 @@ import { emptyTokens } from '../runtime/types.ts'
 import { promptFingerprint, renderIssuePrompt } from '../workflow/prompt.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { LifecycleRole } from '../lifecycle/types.ts'
+import { parseUserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 
 export interface HarnessRunnerConfig {
   readonly permissionPreset: string
@@ -263,18 +264,21 @@ export class HarnessAgentRunner {
       name: tool.name,
       description: tool.description,
       parameters: {
-        operation: { type: 'string', enum: ['get', 'update'], required: true },
+        operation: { type: 'string', enum: ['get', 'update', 'record-user-test-evidence'], required: true },
         nativeRef: { type: 'string', required: true },
         title: { type: 'string' },
         description: { oneOf: [{ type: 'string' }, { type: 'null' }] },
         state: { type: 'string' },
         priority: { oneOf: [{ type: 'integer' }, { type: 'null' }] },
+        evidence: { type: 'json', description: 'Structured exact-commit evidence patch; required for record-user-test-evidence.' },
       },
       output: {
         schema: { type: 'json' },
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
+        const evidence = args.evidence === undefined ? undefined : parseUserTestEvidencePatch(args.evidence)
+        if (typeof evidence === 'string') throw new Error(`invalid User Test evidence: ${evidence}`)
         return await tool.execute({
           operation: args.operation,
           nativeRef: args.nativeRef,
@@ -282,6 +286,7 @@ export class HarnessAgentRunner {
           ...(args.description === undefined ? {} : { description: args.description }),
           ...(args.state === undefined ? {} : { state: args.state }),
           ...(args.priority === undefined ? {} : { priority: args.priority }),
+          ...(evidence === undefined ? {} : { evidence }),
         }, exec.signal) as never
       },
     }))

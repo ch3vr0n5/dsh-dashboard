@@ -24,12 +24,14 @@ policy:
     roles:
       planning: { provider: claude-code-worker, model: claude-opus-5, reasoning_effort: high, fallback_model: claude-sonnet-5, fallback_reasoning_effort: high, fallback_after_failures: 1, permission_preset: read-only, max_turns: 1 }
       implementation: { provider: claude-code-worker, model: claude-sonnet-5, reasoning_effort: medium, permission_preset: workspace-write }
+      delivery: { provider: claude-code-worker, model: claude-sonnet-5, reasoning_effort: medium, permission_preset: workspace-write }
 ---
 Work the task.`, '/tmp/WORKFLOW.md', options)
 
     expect(workflow.lifecycle?.enabled).toBe(true)
     expect(workflow.lifecycle?.roles.planning).toMatchObject({ model: 'claude-opus-5', fallback_model: 'claude-sonnet-5', permission_preset: 'read-only' })
     expect(workflow.lifecycle?.roles.implementation).toMatchObject({ model: 'claude-sonnet-5', permission_preset: 'workspace-write' })
+    expect(workflow.lifecycle?.roles.delivery).toMatchObject({ model: 'claude-sonnet-5', permission_preset: 'workspace-write' })
   })
 
   it('keeps the preferred route until its explicit failure fallback activates', () => {

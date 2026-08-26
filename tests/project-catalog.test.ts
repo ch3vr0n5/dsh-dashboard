@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
@@ -315,7 +315,7 @@ describe('ProjectCatalog', () => {
 })
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), 'dsh-dashboard-catalog-'))
+  const path = await realpath(await mkdtemp(join(tmpdir(), 'dsh-dashboard-catalog-')))
   temporaryDirectories.push(path)
   return path
 }

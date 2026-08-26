@@ -2,6 +2,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { TaskIssue, TaskSourceContext } from '../domain/issue.ts'
+import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 
 export type { IssueBlocker, IssueState, TaskIssue, TaskSourceContext } from '../domain/issue.ts'
 
@@ -34,6 +35,7 @@ export interface TaskSourceCapabilities {
   readonly update: boolean
   readonly delete: boolean
   readonly states: readonly string[]
+  readonly userTestEvidence?: boolean
 }
 
 export type TaskSourceAgentTool =
@@ -59,12 +61,13 @@ export type TaskSourceAgentTool =
       readonly name: string
       readonly description: string
       execute(request: {
-        readonly operation: 'get' | 'update'
+        readonly operation: 'get' | 'update' | 'record-user-test-evidence'
         readonly nativeRef: string
         readonly title?: string
         readonly description?: string | null
         readonly state?: string
         readonly priority?: number | null
+        readonly evidence?: UserTestEvidencePatch
       }, signal?: AbortSignal): Promise<unknown>
     }
 
@@ -79,6 +82,7 @@ export interface TaskSource {
   capabilities?(): TaskSourceCapabilities
   createTask?(input: CreateTaskInput, signal?: AbortSignal): Promise<TaskIssue>
   updateTask?(nativeRef: string, input: UpdateTaskInput, signal?: AbortSignal): Promise<TaskIssue>
+  recordUserTestEvidence?(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<TaskIssue>
   deleteTask?(nativeRef: string, signal?: AbortSignal): Promise<boolean>
   agentTool?(): TaskSourceAgentTool
   /** @deprecated Implement `agentTool()` for new providers. */

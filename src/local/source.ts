@@ -7,6 +7,12 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { IssueState, TaskIssue, TaskSourceContext } from '../domain/issue.ts'
 import { normalizedState } from '../domain/issue.ts'
 import { DashboardDomainError } from '../runtime/errors.ts'
+import {
+  appendUserTestEvidence,
+  evaluateUserTestGate,
+  parseUserTestEvidencePatch,
+  type UserTestEvidencePatch,
+} from '../lifecycle/user-test-evidence.ts'
 import type {
   CreateTaskInput,
   TaskSource,
@@ -25,6 +31,7 @@ interface StoredIssue {
   readonly priority?: number
   readonly createdAt: string
   readonly updatedAt: string
+  readonly userTestEvidence?: unknown
 }
 
 interface StoredProject {
@@ -73,7 +80,7 @@ export class LocalTaskSource implements TaskSource {
   }
 
   capabilities(): TaskSourceCapabilities {
-    return { create: true, update: true, delete: true, states: this.validRouting().states }
+    return { create: true, update: true, delete: true, states: this.validRouting().states, userTestEvidence: true }
   }
 
   async listBoardIssues(signal?: AbortSignal): Promise<readonly TaskIssue[]> {
@@ -147,19 +154,61 @@ export class LocalTaskSource implements TaskSource {
         ? previous.description
         : input.description === null || input.description.trim() === '' ? undefined : input.description.trim()
       const priority = input.priority === undefined ? previous.priority : checkedPriority(input.priority ?? undefined)
+      const nextState = input.state === undefined ? previous.state : checkedState(input.state, routing)
+      if (normalizedState(nextState) === 'user test' && normalizedState(previous.state) !== 'user test') {
+        const gate = evaluateUserTestGate(previous.userTestEvidence)
+        if (!gate.ready) {
+          throw new DashboardDomainError(
+            'local.userTestEvidenceMissing',
+            `User Test transition blocked for LOCAL-${previous.number}:\n${gate.diagnostics.map(item => `- ${item}`).join('\n')}`,
+            { identifier: `LOCAL-${previous.number}`, diagnostics: gate.diagnostics.join('\n') },
+          )
+        }
+      }
       const updated: StoredIssue = {
         id: previous.id,
         number: previous.number,
         title: input.title === undefined ? previous.title : requiredTitle(input.title),
         ...(description === undefined ? {} : { description }),
-        state: input.state === undefined ? previous.state : checkedState(input.state, routing),
+        state: nextState,
         ...(priority === undefined ? {} : { priority }),
         createdAt: previous.createdAt,
         updatedAt: nextUpdatedAt(previous.updatedAt),
+        ...(previous.userTestEvidence === undefined ? {} : { userTestEvidence: previous.userTestEvidence }),
       }
       project.issues[index] = updated
       await this.writeStore(store)
       return normalizeIssue(project.issues[index]!, routing)
+    })
+  }
+
+  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<TaskIssue> {
+    return await this.serialize(async () => {
+      throwIfAborted(signal)
+      const routing = this.validRouting()
+      const store = await this.readStore()
+      const project = store.projects[routing.projectId]
+      const index = project?.issues.findIndex(issue => issue.id === nativeRef) ?? -1
+      if (project === undefined || index < 0) {
+        throw new DashboardDomainError('local.taskNotFound', `Local task ${JSON.stringify(nativeRef)} was not found`, { nativeRef })
+      }
+      const previous = project.issues[index]!
+      const parsed = parseUserTestEvidencePatch(input)
+      if (typeof parsed === 'string') {
+        throw new DashboardDomainError('local.userTestEvidenceInvalid', `User Test evidence rejected for LOCAL-${previous.number}: ${parsed}`, {
+          identifier: `LOCAL-${previous.number}`, diagnostics: parsed,
+        })
+      }
+      const ledger = appendUserTestEvidence(previous.userTestEvidence, parsed)
+      if (typeof ledger === 'string') {
+        throw new DashboardDomainError('local.userTestEvidenceInvalid', `User Test evidence rejected for LOCAL-${previous.number}: ${ledger}`, {
+          identifier: `LOCAL-${previous.number}`, diagnostics: ledger,
+        })
+      }
+      const updated: StoredIssue = { ...previous, userTestEvidence: ledger, updatedAt: nextUpdatedAt(previous.updatedAt) }
+      project.issues[index] = updated
+      await this.writeStore(store)
+      return normalizeIssue(updated, routing)
     })
   }
 
@@ -182,9 +231,13 @@ export class LocalTaskSource implements TaskSource {
     return {
       kind: 'task-mutation',
       name: 'local_task',
-      description: 'Read or update a task in the configured local Dashboard project. Use update to keep the current task state and workpad current; deletion is intentionally unavailable to Agents.',
+      description: 'Read or update a task, or append structured User Test evidence, in the configured local Dashboard project. User Test transitions are rejected until exact-commit evidence passes; deletion is intentionally unavailable to Agents.',
       execute: async (request, signal) => {
         if (request.operation === 'get') return (await this.getIssuesByNativeRefs([request.nativeRef], signal))[0] ?? null
+        if (request.operation === 'record-user-test-evidence') {
+          if (request.evidence === undefined) throw new Error('record-user-test-evidence requires evidence')
+          return await this.recordUserTestEvidence(request.nativeRef, request.evidence, signal)
+        }
         return await this.updateTask(request.nativeRef, {
           ...(request.title === undefined ? {} : { title: request.title }),
           ...(request.description === undefined ? {} : { description: request.description }),
@@ -295,6 +348,7 @@ function normalizeIssue(issue: StoredIssue, routing: LocalRoutingConfig): TaskIs
     dispatchable: true,
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
+    userTestGate: evaluateUserTestGate(issue.userTestEvidence),
   }
 }
 
@@ -384,7 +438,11 @@ function decodeIssue(value: unknown, projectId: string, index: number): StoredIs
       { projectId, index },
     )
   }
-  return { id, number, title, ...(description === undefined ? {} : { description }), state, ...(priority === undefined ? {} : { priority }), createdAt, updatedAt }
+  return {
+    id, number, title, ...(description === undefined ? {} : { description }), state,
+    ...(priority === undefined ? {} : { priority }), createdAt, updatedAt,
+    ...(value.userTestEvidence === undefined ? {} : { userTestEvidence: value.userTestEvidence }),
+  }
 }
 
 function readNonBlank(value: unknown): string | undefined {

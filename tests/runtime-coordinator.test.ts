@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -246,7 +246,7 @@ Work on {{ issue.identifier }}: {{ issue.title }}.
 }
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), 'dsh-dashboard-runtime-'))
+  const path = await realpath(await mkdtemp(join(tmpdir(), 'dsh-dashboard-runtime-')))
   temporaryDirectories.push(path)
   return path
 }
