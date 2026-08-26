@@ -335,7 +335,7 @@ describe('DashboardOrchestrator reconciliation', () => {
     await fixture.access.reconcileRuntime([original], definition)
     expect(fixture.access.runtimeArchive.get(issueKey(original))?.phase).toBe('blocked')
 
-    const revised = task('Todo', '2026-08-25T02:00:00.000Z')
+    const revised = { ...task('Todo', '2026-08-25T02:00:00.000Z'), description: 'User supplied concrete retry feedback.' }
     await fixture.access.reconcileRuntime([revised], definition)
     const launch = vi.spyOn(fixture.access, 'launch').mockImplementation(() => undefined)
     fixture.access.dispatch([revised], definition)

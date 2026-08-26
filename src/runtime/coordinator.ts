@@ -12,7 +12,6 @@ import type {
 import type { DashboardSnapshot, IssueDetailView, TaskTimelineOptions, TaskTimelinePage } from './types.ts'
 import { issueKey } from '../domain/issue.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
-import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 import type { DashboardOrchestrator } from '../orchestrator/orchestrator.ts'
 import type { WorkflowParseOptions } from '../workflow/parser.ts'
 import { providerString } from '../workflow/provider.ts'
@@ -218,10 +217,6 @@ export class DashboardRuntimeCoordinator {
 
   async updateTask(nativeRef: string, input: UpdateTaskInput, signal?: AbortSignal): Promise<void> {
     await this.requireProjectMode('update a task').orchestrator.updateTask(nativeRef, input, signal)
-  }
-
-  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<void> {
-    await this.requireProjectMode('record User Test evidence').orchestrator.recordUserTestEvidence(nativeRef, input, signal)
   }
 
   async deleteTask(nativeRef: string, signal?: AbortSignal): Promise<boolean> {

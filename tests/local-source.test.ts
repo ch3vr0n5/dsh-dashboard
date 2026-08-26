@@ -34,8 +34,6 @@ describe('LocalTaskSource', () => {
     }))
     const task = await source.createTask({ title: 'Evidence-backed card', state: 'Human Review' })
     const sha = 'a'.repeat(40)
-    const tool = source.agentTool()
-    if (tool.kind !== 'task-mutation') throw new Error('Local source must expose the task-mutation tool')
     const evidence = {
       commitSha: sha,
       automatedTests: { result: 'passed' as const, timestamp: '2026-08-26T06:00:00Z', commitSha: sha },
@@ -44,7 +42,14 @@ describe('LocalTaskSource', () => {
       deployment: { deployedSha: sha, timestamp: '2026-08-26T06:15:00Z' },
       liveVerification: { result: 'passed' as const, timestamp: '2026-08-26T06:20:00Z', url: 'http://127.0.0.1:3000/health', verifiedSha: sha },
     }
-    await tool.execute({ operation: 'record-user-test-evidence', nativeRef: task.nativeRef, evidence }, undefined)
+    await source.recordUserTestEvidence(task.nativeRef, { commitSha: sha, automatedTests: evidence.automatedTests }, { role: 'qa', workspaceSha: sha })
+    await source.recordUserTestEvidence(task.nativeRef, { commitSha: sha, automatedReview: evidence.automatedReview }, { role: 'review', workspaceSha: sha })
+    await source.recordUserTestEvidence(task.nativeRef, {
+      commitSha: sha,
+      pullRequest: evidence.pullRequest,
+      deployment: evidence.deployment,
+      liveVerification: evidence.liveVerification,
+    }, { role: 'delivery', workspaceSha: sha })
 
     const transitioned = await source.updateTask(task.nativeRef, { state: 'User Test' })
     expect(transitioned).toMatchObject({ state: { name: 'User Test' }, userTestGate: { ready: true, attempts: [{ attempt: 1, commitSha: sha }] } })

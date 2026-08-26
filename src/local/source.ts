@@ -11,6 +11,7 @@ import {
   appendUserTestEvidence,
   evaluateUserTestGate,
   parseUserTestEvidencePatch,
+  type UserTestEvidenceAuthority,
   type UserTestEvidencePatch,
 } from '../lifecycle/user-test-evidence.ts'
 import type {
@@ -182,7 +183,7 @@ export class LocalTaskSource implements TaskSource {
     })
   }
 
-  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<TaskIssue> {
+  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, authority: UserTestEvidenceAuthority, signal?: AbortSignal): Promise<TaskIssue> {
     return await this.serialize(async () => {
       throwIfAborted(signal)
       const routing = this.validRouting()
@@ -199,7 +200,7 @@ export class LocalTaskSource implements TaskSource {
           identifier: `LOCAL-${previous.number}`, diagnostics: parsed,
         })
       }
-      const ledger = appendUserTestEvidence(previous.userTestEvidence, parsed)
+      const ledger = appendUserTestEvidence(previous.userTestEvidence, parsed, authority)
       if (typeof ledger === 'string') {
         throw new DashboardDomainError('local.userTestEvidenceInvalid', `User Test evidence rejected for LOCAL-${previous.number}: ${ledger}`, {
           identifier: `LOCAL-${previous.number}`, diagnostics: ledger,
@@ -231,13 +232,10 @@ export class LocalTaskSource implements TaskSource {
     return {
       kind: 'task-mutation',
       name: 'local_task',
-      description: 'Read or update a task, or append structured User Test evidence, in the configured local Dashboard project. User Test transitions are rejected until exact-commit evidence passes; deletion is intentionally unavailable to Agents.',
+      description: 'Read or update the owned task in the configured local Dashboard project. User Test transitions are rejected until host-authorized exact-commit evidence passes; deletion is intentionally unavailable to Agents.',
       execute: async (request, signal) => {
         if (request.operation === 'get') return (await this.getIssuesByNativeRefs([request.nativeRef], signal))[0] ?? null
-        if (request.operation === 'record-user-test-evidence') {
-          if (request.evidence === undefined) throw new Error('record-user-test-evidence requires evidence')
-          return await this.recordUserTestEvidence(request.nativeRef, request.evidence, signal)
-        }
+        if (request.operation === 'record-user-test-evidence') throw new Error('User Test evidence requires lifecycle role-scoped host authorization')
         return await this.updateTask(request.nativeRef, {
           ...(request.title === undefined ? {} : { title: request.title }),
           ...(request.description === undefined ? {} : { description: request.description }),

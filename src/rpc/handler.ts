@@ -3,7 +3,6 @@
 import type { DashboardRuntimeCoordinator } from '../runtime/coordinator.ts'
 import type { RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import { DashboardDomainError, encodeDashboardError } from '../runtime/errors.ts'
-import { parseUserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 
 /** Dispatch the intentionally small Dashboard RPC surface. */
 export async function handleDashboardRpc(
@@ -70,14 +69,6 @@ export async function handleDashboardRpc(
         if (nativeRef === undefined) return badRequest('updateTask requires a non-empty `nativeRef`')
         if (typeof changes === 'string') return badRequest(changes)
         await runtime.updateTask(nativeRef, changes, signal)
-        return success(await runtime.snapshot())
-      }
-      case 'recordUserTestEvidence': {
-        const nativeRef = readStringField(payload, 'nativeRef')
-        const evidence = parseUserTestEvidencePatch(readObjectField(payload, 'evidence'))
-        if (nativeRef === undefined) return badRequest('recordUserTestEvidence requires a non-empty `nativeRef`')
-        if (typeof evidence === 'string') return badRequest(`recordUserTestEvidence ${evidence}`)
-        await runtime.recordUserTestEvidence(nativeRef, evidence, signal)
         return success(await runtime.snapshot())
       }
       case 'deleteTask': {

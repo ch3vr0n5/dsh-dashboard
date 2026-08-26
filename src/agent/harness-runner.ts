@@ -1,6 +1,8 @@
 /** Same-thread multi-turn runner backed by the Harness Agent registry. */
 
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -22,6 +24,8 @@ import { promptFingerprint, renderIssuePrompt } from '../workflow/prompt.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { LifecycleRole } from '../lifecycle/types.ts'
 import { parseUserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
+
+const execFileAsync = promisify(execFile)
 
 export interface HarnessRunnerConfig {
   readonly permissionPreset: string
@@ -121,7 +125,7 @@ export class HarnessAgentRunner {
       const setup = async (agentCtx: Context): Promise<void> => {
         if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
         installModelSelection(agentCtx, selected)
-        this.installTaskSourceTool(agentCtx, source)
+        this.installTaskSourceTool(agentCtx, source, request)
       }
       handle = resumed
         ? await this.ctx.agents.resume({
@@ -212,7 +216,7 @@ export class HarnessAgentRunner {
     }
   }
 
-  private installTaskSourceTool(agentCtx: Context, source: TaskSource): void {
+  private installTaskSourceTool(agentCtx: Context, source: TaskSource, request: AgentRunRequest): void {
     const tool = resolveTaskSourceAgentTool(source)
     if (tool === undefined) return
     const tools = agentCtx.get('tools')
@@ -277,8 +281,27 @@ export class HarnessAgentRunner {
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
+        if (args.nativeRef !== request.issue.nativeRef) {
+          throw new Error(`task tool is scoped to ${request.issue.nativeRef}; cross-task access is forbidden`)
+        }
         const evidence = args.evidence === undefined ? undefined : parseUserTestEvidencePatch(args.evidence)
         if (typeof evidence === 'string') throw new Error(`invalid User Test evidence: ${evidence}`)
+        if (args.operation === 'record-user-test-evidence') {
+          if (evidence === undefined) throw new Error('record-user-test-evidence requires evidence')
+          const role = request.lifecycle?.role
+          if (role !== 'qa' && role !== 'review' && role !== 'delivery') {
+            throw new Error(`lifecycle role ${role ?? 'legacy'} is not authorized to record User Test evidence`)
+          }
+          if (source.recordUserTestEvidence === undefined) throw new Error('task source does not support User Test evidence')
+          const { stdout } = await execFileAsync('git', ['-C', request.workspacePath, 'rev-parse', 'HEAD'], {
+            encoding: 'utf8', signal: exec.signal,
+          })
+          const workspaceSha = stdout.trim()
+          if (workspaceSha !== evidence.commitSha) {
+            throw new Error(`evidence commit ${evidence.commitSha} does not match host-derived workspace HEAD ${workspaceSha}`)
+          }
+          return await source.recordUserTestEvidence(args.nativeRef, evidence, { role, workspaceSha }, exec.signal) as never
+        }
         return await tool.execute({
           operation: args.operation,
           nativeRef: args.nativeRef,

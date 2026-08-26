@@ -41,9 +41,15 @@ export function resolveLifecyclePipeline(
   failureCount: number,
 ): readonly LifecycleRole[] {
   if (!policy.enabled) return ['implementation']
-  const requested = policy.state_roles[normalize(state)] ?? ['planning', 'implementation', 'qa', 'review', 'delivery']
+  // Preserve the pre-delivery fallback for existing version-1 workflows.
+  // Delivery is an externally mutating role and must always be opted into by
+  // an explicit state_roles entry.
+  const requested = policy.state_roles[normalize(state)] ?? ['planning', 'implementation', 'qa']
   const highRisk = new Set(policy.high_risk_labels.map(normalize))
-  const routed = requested.map(role => role === 'review' && labels.some(label => highRisk.has(normalize(label))) ? 'escalation' : role)
+  const highRiskIssue = labels.some(label => highRisk.has(normalize(label)))
+  // High-risk analysis supplements automated review; it never replaces the
+  // review role that owns review evidence.
+  const routed = requested.flatMap(role => role === 'review' && highRiskIssue ? ['escalation', 'review'] as const : [role])
   if (failureCount >= policy.escalate_after_failures && !routed.includes('escalation')) {
     const writer = routed.findIndex(role => role === 'implementation' || role === 'qa')
     const insertAt = writer < 0 ? 0 : writer

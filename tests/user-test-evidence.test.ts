@@ -30,9 +30,18 @@ function completePatch(sha = SHA_A): UserTestEvidencePatch {
 }
 
 function ledgerFor(patch = completePatch()): UserTestEvidenceLedger {
-  const ledger = appendUserTestEvidence(undefined, patch, now)
-  if (typeof ledger === 'string') throw new Error(ledger)
-  return ledger
+  const tests = appendUserTestEvidence(undefined, { commitSha: patch.commitSha, ...(patch.automatedTests === undefined ? {} : { automatedTests: patch.automatedTests }) }, { role: 'qa', workspaceSha: patch.commitSha }, now)
+  if (typeof tests === 'string') throw new Error(tests)
+  const reviewed = appendUserTestEvidence(tests, { commitSha: patch.commitSha, ...(patch.automatedReview === undefined ? {} : { automatedReview: patch.automatedReview }) }, { role: 'review', workspaceSha: patch.commitSha }, now)
+  if (typeof reviewed === 'string') throw new Error(reviewed)
+  const delivered = appendUserTestEvidence(reviewed, {
+    commitSha: patch.commitSha,
+    ...(patch.pullRequest === undefined ? {} : { pullRequest: patch.pullRequest }),
+    ...(patch.deployment === undefined ? {} : { deployment: patch.deployment }),
+    ...(patch.liveVerification === undefined ? {} : { liveVerification: patch.liveVerification }),
+  }, { role: 'delivery', workspaceSha: patch.commitSha }, now)
+  if (typeof delivered === 'string') throw new Error(delivered)
+  return delivered
 }
 
 describe('User Test transition evidence', () => {
@@ -72,7 +81,7 @@ describe('User Test transition evidence', () => {
 
   it('rejects every SHA mismatch and contradictory component commit', () => {
     const ledger = structuredClone(ledgerFor()) as unknown as { attempts: Array<{ revisions: Array<Record<string, any>> }> }
-    const evidence = ledger.attempts[0]!.revisions[0]!
+    const evidence = ledger.attempts[0]!.revisions.at(-1)!
     evidence.automatedTests.commitSha = SHA_B
     evidence.automatedReview.commitSha = SHA_B
     evidence.pullRequest.headSha = SHA_B
@@ -100,17 +109,23 @@ describe('User Test transition evidence', () => {
 
   it('preserves revision history, starts a clean attempt for a revised commit, and rejects writes to superseded commits', () => {
     const testsOnly: UserTestEvidencePatch = { commitSha: SHA_A, automatedTests: completePatch().automatedTests! }
-    const first = appendUserTestEvidence(undefined, testsOnly, now)
+    const first = appendUserTestEvidence(undefined, testsOnly, { role: 'qa', workspaceSha: SHA_A }, now)
     if (typeof first === 'string') throw new Error(first)
-    const reviewed = appendUserTestEvidence(first, { commitSha: SHA_A, automatedReview: completePatch().automatedReview! }, new Date('2026-08-26T11:01:00Z'))
+    const reviewed = appendUserTestEvidence(first, { commitSha: SHA_A, automatedReview: completePatch().automatedReview! }, { role: 'review', workspaceSha: SHA_A }, new Date('2026-08-26T11:01:00Z'))
     if (typeof reviewed === 'string') throw new Error(reviewed)
     expect(reviewed.attempts[0]?.revisions).toHaveLength(2)
     expect(reviewed.attempts[0]?.revisions[0]?.automatedReview).toBeUndefined()
-    const revised = appendUserTestEvidence(reviewed, { commitSha: SHA_B, automatedTests: { ...completePatch(SHA_B).automatedTests! } }, new Date('2026-08-26T11:02:00Z'))
+    const revised = appendUserTestEvidence(reviewed, { commitSha: SHA_B, automatedTests: { ...completePatch(SHA_B).automatedTests! } }, { role: 'qa', workspaceSha: SHA_B }, new Date('2026-08-26T11:02:00Z'))
     if (typeof revised === 'string') throw new Error(revised)
     expect(revised.attempts).toHaveLength(2)
     expect(evaluateUserTestGate(revised).diagnostics).toEqual(expect.arrayContaining(['automated review: missing', 'pull request: missing']))
-    expect(appendUserTestEvidence(revised, testsOnly, new Date('2026-08-26T11:03:00Z'))).toContain('is stale')
+    expect(appendUserTestEvidence(revised, testsOnly, { role: 'qa', workspaceSha: SHA_A }, new Date('2026-08-26T11:03:00Z'))).toContain('is stale')
+  })
+
+  it('rejects wrong-role evidence and a caller SHA that differs from host-derived workspace HEAD', () => {
+    const testsOnly: UserTestEvidencePatch = { commitSha: SHA_A, automatedTests: completePatch().automatedTests! }
+    expect(appendUserTestEvidence(undefined, testsOnly, { role: 'delivery', workspaceSha: SHA_A }, now)).toContain('cannot record automatedTests')
+    expect(appendUserTestEvidence(undefined, testsOnly, { role: 'qa', workspaceSha: SHA_B }, now)).toContain('host-derived workspace SHA')
   })
 
   it('rejects malformed, future, and mismatched evidence before it can be stored', () => {
