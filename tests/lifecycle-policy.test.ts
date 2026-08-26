@@ -50,7 +50,8 @@ Work the task.`, '/tmp/WORKFLOW.md', options)
   it('inserts an Opus escalation before a writer after repeated failures and promotes high-risk reviews', () => {
     const policy = { ...DEFAULT_LIFECYCLE_POLICY, enabled: true, state_roles: { ready: ['implementation'] as const, review: ['review'] as const } }
     expect(resolveLifecyclePipeline(policy, 'Ready', [], 2)).toEqual(['escalation', 'implementation'])
-    expect(resolveLifecyclePipeline(policy, 'Review', ['security'], 0)).toEqual(['escalation'])
+    expect(resolveLifecyclePipeline(policy, 'Review', ['security'], 0)).toEqual(['escalation', 'review'])
+    expect(resolveLifecyclePipeline({ ...policy, state_roles: {} }, 'Unconfigured', [], 0)).toEqual(['planning', 'implementation', 'qa'])
   })
 
   it('routes mixed-case configured state roles through the canonical state key', () => {

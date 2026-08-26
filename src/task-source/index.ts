@@ -2,7 +2,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { TaskIssue, TaskSourceContext } from '../domain/issue.ts'
-import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
+import type { UserTestEvidenceAuthority, UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 
 export type { IssueBlocker, IssueState, TaskIssue, TaskSourceContext } from '../domain/issue.ts'
 
@@ -82,7 +82,7 @@ export interface TaskSource {
   capabilities?(): TaskSourceCapabilities
   createTask?(input: CreateTaskInput, signal?: AbortSignal): Promise<TaskIssue>
   updateTask?(nativeRef: string, input: UpdateTaskInput, signal?: AbortSignal): Promise<TaskIssue>
-  recordUserTestEvidence?(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<TaskIssue>
+  recordUserTestEvidence?(nativeRef: string, input: UserTestEvidencePatch, authority: UserTestEvidenceAuthority, signal?: AbortSignal): Promise<TaskIssue>
   deleteTask?(nativeRef: string, signal?: AbortSignal): Promise<boolean>
   agentTool?(): TaskSourceAgentTool
   /** @deprecated Implement `agentTool()` for new providers. */

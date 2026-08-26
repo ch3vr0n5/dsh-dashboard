@@ -41,9 +41,19 @@ export interface UserTestEvidenceSnapshot {
   readonly liveVerification?: LiveVerificationEvidence
 }
 
+export type UserTestEvidenceComponent = keyof UserTestEvidenceSnapshot
+export type UserTestEvidenceRole = 'qa' | 'review' | 'delivery'
+
+/** Host-derived authority; this is never accepted from an Agent/RPC payload. */
+export interface UserTestEvidenceAuthority {
+  readonly role: UserTestEvidenceRole
+  readonly workspaceSha: string
+}
+
 export interface UserTestEvidenceRevision extends UserTestEvidenceSnapshot {
   readonly revision: number
   readonly recordedAt: string
+  readonly authorities: Readonly<Partial<Record<UserTestEvidenceComponent, UserTestEvidenceAuthority>>>
 }
 
 export interface UserTestEvidenceAttempt {
@@ -112,8 +122,16 @@ export function parseUserTestEvidencePatch(value: unknown, now = new Date()): Us
 export function appendUserTestEvidence(
   ledgerValue: unknown,
   patch: UserTestEvidencePatch,
+  authority: UserTestEvidenceAuthority,
   now = new Date(),
 ): UserTestEvidenceLedger | string {
+  if (authority.workspaceSha !== patch.commitSha) {
+    return `host-derived workspace SHA ${authority.workspaceSha} does not match evidence commit ${patch.commitSha}`
+  }
+  const unauthorized = evidenceComponents(patch).filter(component => !roleOwnsComponent(authority.role, component))
+  if (unauthorized.length > 0) {
+    return `lifecycle role ${authority.role} cannot record ${unauthorized.join(', ')}`
+  }
   const ledger = ledgerValue === undefined ? { version: 1 as const, attempts: [] } : readLedger(ledgerValue)
   if (typeof ledger === 'string') return ledger
   const current = ledger.attempts.at(-1)
@@ -133,6 +151,10 @@ export function appendUserTestEvidence(
     ...components,
     revision: (previous?.revision ?? 0) + 1,
     recordedAt,
+    authorities: {
+      ...(previous?.authorities ?? {}),
+      ...Object.fromEntries(evidenceComponents(patch).map(component => [component, authority])),
+    },
   }
   const attempts = [...ledger.attempts]
   if (current?.commitSha === patch.commitSha) {
@@ -175,6 +197,11 @@ export function evaluateUserTestGate(ledgerValue: unknown): UserTestGateView {
     if (evidence.liveVerification.result !== 'passed') diagnostics.push('live verification: result is failed; verify the deployed artifact and record a passing result')
     if (evidence.liveVerification.verifiedSha !== sha) diagnostics.push(`live verification: verified SHA ${evidence.liveVerification.verifiedSha} does not match PR head SHA ${sha}`)
   }
+  checkAuthority('automatedTests', 'qa', evidence?.authorities.automatedTests, sha, diagnostics)
+  checkAuthority('automatedReview', 'review', evidence?.authorities.automatedReview, sha, diagnostics)
+  checkAuthority('pullRequest', 'delivery', evidence?.authorities.pullRequest, sha, diagnostics)
+  checkAuthority('deployment', 'delivery', evidence?.authorities.deployment, sha, diagnostics)
+  checkAuthority('liveVerification', 'delivery', evidence?.authorities.liveVerification, sha, diagnostics)
   if (evidence?.pullRequest !== undefined && evidence.automatedTests !== undefined && evidence.automatedTests.timestamp > evidence.pullRequest.timestamp) {
     diagnostics.push('automated tests: timestamp is after the PR-head observation; rerun tests before recording the PR evidence')
   }
@@ -195,6 +222,20 @@ function checkCommitResult(label: string, value: CommitResultEvidence | undefine
   else {
     if (value.result !== 'passed') diagnostics.push(`${label}: result is failed; record a passing result for ${sha}`)
     if (value.commitSha !== sha) diagnostics.push(`${label}: commit ${value.commitSha} does not match PR head SHA ${sha}`)
+  }
+}
+
+function checkAuthority(
+  component: UserTestEvidenceComponent,
+  role: UserTestEvidenceRole,
+  authority: UserTestEvidenceAuthority | undefined,
+  sha: string,
+  diagnostics: string[],
+): void {
+  if (authority === undefined) diagnostics.push(`${component}: missing host-derived ${role} provenance`)
+  else {
+    if (authority.role !== role) diagnostics.push(`${component}: recorded by ${authority.role}, expected ${role}`)
+    if (authority.workspaceSha !== sha) diagnostics.push(`${component}: host-derived workspace SHA ${authority.workspaceSha} does not match ${sha}`)
   }
 }
 
@@ -233,7 +274,34 @@ function readRevision(value: unknown, index: number, commitSha: string): UserTes
   if (recordedAt === undefined) return `revision ${index + 1} has an invalid recordedAt timestamp`
   const patch = parseUserTestEvidencePatch({ ...value, commitSha }, new Date(8640000000000000))
   if (typeof patch === 'string') return `revision ${index + 1}: ${patch}`
-  return { ...patch, revision: index + 1, recordedAt }
+  const authorities = readAuthorities(value.authorities)
+  if (typeof authorities === 'string') return `revision ${index + 1}: ${authorities}`
+  return { ...patch, revision: index + 1, recordedAt, authorities }
+}
+
+function readAuthorities(value: unknown): Readonly<Partial<Record<UserTestEvidenceComponent, UserTestEvidenceAuthority>>> | string {
+  if (!isObject(value)) return 'authorities must be a host-derived object'
+  const result: Partial<Record<UserTestEvidenceComponent, UserTestEvidenceAuthority>> = {}
+  for (const component of ['automatedTests', 'automatedReview', 'pullRequest', 'deployment', 'liveVerification'] as const) {
+    const raw = value[component]
+    if (raw === undefined) continue
+    if (!isObject(raw) || (raw.role !== 'qa' && raw.role !== 'review' && raw.role !== 'delivery')) return `authorities.${component}.role is invalid`
+    const workspaceSha = readSha(raw.workspaceSha)
+    if (workspaceSha === undefined) return `authorities.${component}.workspaceSha must be a lowercase, full 40-character Git SHA`
+    result[component] = { role: raw.role, workspaceSha }
+  }
+  return result
+}
+
+function evidenceComponents(patch: UserTestEvidencePatch): UserTestEvidenceComponent[] {
+  return (['automatedTests', 'automatedReview', 'pullRequest', 'deployment', 'liveVerification'] as const)
+    .filter(component => patch[component] !== undefined)
+}
+
+function roleOwnsComponent(role: UserTestEvidenceRole, component: UserTestEvidenceComponent): boolean {
+  if (role === 'qa') return component === 'automatedTests'
+  if (role === 'review') return component === 'automatedReview'
+  return component === 'pullRequest' || component === 'deployment' || component === 'liveVerification'
 }
 
 function readCommitResult(value: unknown, field: string, now: Date): CommitResultEvidence | string {

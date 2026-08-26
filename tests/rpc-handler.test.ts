@@ -5,28 +5,13 @@ import { DashboardDomainError, decodeDashboardError } from '../src/runtime/error
 import type { DashboardRuntimeCoordinator } from '../src/runtime/coordinator.ts'
 
 describe('Dashboard RPC project switching', () => {
-  it('validates and dispatches structured User Test evidence through the supported RPC', async () => {
-    const sha = 'a'.repeat(40)
+  it('does not expose User Test evidence writes over the generic Dashboard RPC', async () => {
     const recordUserTestEvidence = vi.fn(async () => undefined)
-    const runtime = { recordUserTestEvidence, snapshot: vi.fn(async () => fixtureSnapshot) } as unknown as DashboardRuntimeCoordinator
-    const evidence = {
-      commitSha: sha,
-      automatedReview: { result: 'passed', timestamp: '2025-08-26T10:00:00Z', commitSha: sha, unresolvedBlockingFindings: 0 },
-    }
-
-    const result = await handleDashboardRpc(runtime, 'recordUserTestEvidence', { nativeRef: 'task-1', evidence }, new AbortController().signal)
-
-    expect(result.ok).toBe(true)
-    expect(recordUserTestEvidence).toHaveBeenCalledWith('task-1', expect.objectContaining({ commitSha: sha }), expect.any(AbortSignal))
-  })
-
-  it('rejects malformed User Test evidence before any mutation', async () => {
-    const recordUserTestEvidence = vi.fn()
     const runtime = { recordUserTestEvidence } as unknown as DashboardRuntimeCoordinator
     const result = await handleDashboardRpc(runtime, 'recordUserTestEvidence', {
       nativeRef: 'task-1', evidence: { commitSha: 'short', automatedTests: {} },
     }, new AbortController().signal)
-    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('40-character Git SHA') } })
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('unknown Dashboard endpoint') } })
     expect(recordUserTestEvidence).not.toHaveBeenCalled()
   })
 

@@ -22,7 +22,6 @@ import type {
 import { addTokens, emptyTokens } from '../runtime/types.ts'
 import { buildTaskTimelinePage, RuntimeTimelineArchive } from '../runtime/timeline.ts'
 import type { CreateTaskInput, TaskSourceResolver, UpdateTaskInput } from '../task-source/index.ts'
-import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 import type { WorkflowStore } from '../workflow/store.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { WorkspaceManager } from '../workspace/manager.ts'
@@ -267,14 +266,6 @@ export class DashboardOrchestrator {
     const source = this.sources.require(definition.tracker.kind)
     if (source.updateTask === undefined) throw new Error(`Task source ${source.kind} does not support Dashboard task updates`)
     await source.updateTask(nativeRef, input, signal)
-    await this.refreshAfterMutation()
-  }
-
-  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<void> {
-    const definition = this.workflow.require()
-    const source = this.sources.require(definition.tracker.kind)
-    if (source.recordUserTestEvidence === undefined) throw new Error(`Task source ${source.kind} does not support structured User Test evidence`)
-    await source.recordUserTestEvidence(nativeRef, input, signal)
     await this.refreshAfterMutation()
   }
 
@@ -884,11 +875,16 @@ function blockerReason(issue: TaskIssue): string {
 }
 
 function issueRevision(issue: TaskIssue): string {
-  const value = issue.updatedAt ?? JSON.stringify({
+  // Provider timestamps may also advance for evidence-only metadata. Keep
+  // lifecycle role identity bound to implementation-relevant card content so
+  // appending QA/review/delivery evidence cannot invalidate completed roles.
+  const value = JSON.stringify({
     state: normalizedState(issue.state.name),
     title: issue.title,
     description: issue.description ?? null,
     priority: issue.priority ?? null,
+    branchName: issue.branchName ?? null,
+    labels: [...issue.labels].map(normalizedState).sort(),
   })
   return createHash('sha256').update(value).digest('hex')
 }
