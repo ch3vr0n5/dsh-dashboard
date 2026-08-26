@@ -1682,7 +1682,7 @@ function AutonomousLifecyclePanel({ lifecycle }: { readonly lifecycle: NonNullab
       <div className="dshd-autonomous-lifecycle" data-source={lifecycle.source}>
         <InspectorRow label={t('inspector.autonomousState')}><code>{lifecycle.state}</code></InspectorRow>
         <InspectorRow label={t('inspector.autonomousRole')}><span>{lifecycle.currentRole}</span></InspectorRow>
-        <InspectorRow label={t('inspector.autonomousNext')}><code>{lifecycle.nextTransition ?? '—'}</code></InspectorRow>
+        <InspectorRow label={t('inspector.autonomousNext')}><code>{lifecycle.nextTransitions.length === 0 ? '—' : lifecycle.nextTransitions.join(' / ')}</code></InspectorRow>
         <InspectorRow label={t('inspector.autonomousTaskKey')}><code>{lifecycle.taskKey}/{lifecycle.taskSlug}</code></InspectorRow>
         {lifecycle.interrupt === undefined ? null : (
           <div className="dshd-autonomous-interrupt" data-human={lifecycle.interrupt.requiresHuman || undefined}>

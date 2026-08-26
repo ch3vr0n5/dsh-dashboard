@@ -39,7 +39,9 @@ export type { DashboardSnapshot, IssueDetailView } from './runtime/types.ts'
 export type {
   AutonomousLifecycleView,
   AutonomousState,
+  ControlPlaneEventRecord,
   ControlPlaneReadAdapter,
+  ControlPlaneReadResult,
   ControlPlaneTaskEvent,
   ControlPlaneTaskRead,
   ControlPlaneTaskReference,

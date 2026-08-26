@@ -32,6 +32,7 @@ import type { LifecycleRole } from '../lifecycle/types.ts'
 import {
   autonomousTaskIdentity,
   projectAutonomousLifecycle,
+  readControlPlaneTask,
   type ControlPlaneReadAdapter,
 } from '../lifecycle/autonomous.ts'
 
@@ -57,6 +58,8 @@ export interface OrchestratorConfig {
   readonly permissionPreset: string
   readonly agentPreset?: string
   readonly workerHost: string
+  /** Test/integration override; production defaults to the bounded v1 timeout. */
+  readonly controlPlaneReadTimeoutMs?: number
 }
 
 /** Long-lived service logic; every mutable operation is bounded to the caller plugin fiber. */
@@ -343,24 +346,25 @@ export class DashboardOrchestrator {
   private async projectAutonomousBoard(board: readonly TaskIssue[]): Promise<readonly TaskIssue[]> {
     return await Promise.all(board.map(async (issue) => {
       const identity = autonomousTaskIdentity(issue.identifier, issue.title)
-      let events: readonly import('../lifecycle/autonomous.ts').ControlPlaneTaskEvent[] | undefined
+      let read: import('../lifecycle/autonomous.ts').ControlPlaneTaskRead | undefined
+      let readFailure: string | undefined
       if (this.controlPlane !== undefined) {
-        try {
-          const result = await this.controlPlane.readTask({
-            projectId: this.config.projectId,
-            taskKey: identity.taskKey,
-            taskSlug: identity.taskSlug,
-            taskId: `${identity.taskKey}-${identity.taskSlug}`,
-            domain: 'work',
-          })
-          events = result?.events
-        } catch (error) {
-          this.ctx.logger.warn('dsh-dashboard: control-plane read failed for %s: %s', issue.identifier, error instanceof Error ? error.message : String(error))
+        const result = await readControlPlaneTask(this.controlPlane, {
+          projectId: this.config.projectId,
+          taskKey: identity.taskKey,
+          taskSlug: identity.taskSlug,
+          taskId: `${identity.taskKey}-${identity.taskSlug}`,
+          domain: 'work',
+        }, this.config.controlPlaneReadTimeoutMs)
+        if (result.status === 'ok') read = result.read
+        else {
+          readFailure = result.warning
+          this.ctx.logger.warn('dsh-dashboard: control-plane read failed for %s: %s', issue.identifier, result.warning)
         }
       }
       return {
         ...issue,
-        autonomousLifecycle: projectAutonomousLifecycle(issue.identifier, issue.title, issue.state.name, events),
+        autonomousLifecycle: projectAutonomousLifecycle(issue.identifier, issue.title, issue.state.name, read, readFailure),
       }
     }))
   }
