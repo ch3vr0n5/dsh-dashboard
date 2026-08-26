@@ -4,6 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DashboardSurface } from '../src/client/Dashboard.tsx'
 import { fixtureSnapshot } from '../src/client/fixture.ts'
+import { projectAutonomousLifecycle } from '../src/lifecycle/autonomous.ts'
+import type { AutonomousEvidence, AutonomousState, ControlPlaneEventRecord } from '../src/lifecycle/autonomous.ts'
 
 const callbacks = {
   onRefresh: async () => {},
@@ -56,5 +58,49 @@ describe('task detail inspector', () => {
     expect(screen.getByRole('menu')).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '停止 Agent' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '复制任务标识' })).toBeTruthy()
+  })
+
+  it('shows current role, next transition, structured evidence, and a true human interrupt in the inspector', () => {
+    const sha = 'a'.repeat(40)
+    const issue = fixtureSnapshot.board.columns[2]!.issues[0]!
+    const cpTaskId = 'eng-238-implement-issue-detail-inspector'
+    const transition = (version: number, to: AutonomousState, actorId: string, evidence: AutonomousEvidence = {}): ControlPlaneEventRecord => ({
+      streamVersion: version,
+      event: {
+        schemaVersion: 'control-plane/v1', eventId: `event-${version}`, type: 'STATE_TRANSITIONED', taskId: cpTaskId, domain: 'work',
+        actor: { id: actorId, domain: 'work' }, occurredAt: `2026-08-26T10:0${version}:00.000Z`, payload: { to, evidence },
+      },
+    })
+    const events: ControlPlaneEventRecord[] = [
+      {
+        streamVersion: 1,
+        event: {
+          schemaVersion: 'control-plane/v1', eventId: 'created', type: 'TASK_CREATED', taskId: cpTaskId, domain: 'work',
+          actor: { id: 'intake', domain: 'work' }, occurredAt: '2026-08-26T10:01:00.000Z', payload: { title: issue.title, initialState: 'IDEA' },
+        },
+      },
+      transition(2, 'TRIAGE', 'triage'), transition(3, 'PLANNING', 'planner'), transition(4, 'READY', 'planner'),
+      transition(5, 'CLAIMED', 'claimer'), transition(6, 'IMPLEMENTING', 'author'), transition(7, 'LOCAL_QA', 'qa'),
+      transition(8, 'PR_OPEN', 'author', { headSha: sha, baseSha: 'b'.repeat(40), pullRequestUrl: 'https://example.test/pr/238', authorId: 'author' }),
+      transition(9, 'WAITING_HUMAN', 'operator', { reason: 'approval required' }),
+    ]
+    const lifecycle = projectAutonomousLifecycle(issue.identifier, issue.title, issue.state.name, { version: 9, events })
+    const snapshot = {
+      ...fixtureSnapshot,
+      board: {
+        ...fixtureSnapshot.board,
+        columns: fixtureSnapshot.board.columns.map(column => ({
+          ...column,
+          issues: column.issues.map(candidate => candidate.nativeRef === issue.nativeRef ? { ...candidate, autonomousLifecycle: lifecycle } : candidate),
+        })),
+      },
+    }
+    render(<DashboardSurface {...callbacks} snapshot={snapshot} initialSelectedKey="linear:ENG:issue-238" />)
+
+    expect(screen.getByText('自主生命周期')).toBeTruthy()
+    expect(screen.getByText('human')).toBeTruthy()
+    expect(screen.getByText('WAITING_HUMAN')).toBeTruthy()
+    expect(screen.getByText('正在等待明确的人类决定')).toBeTruthy()
+    expect(screen.getByText('headSha')).toBeTruthy()
   })
 })

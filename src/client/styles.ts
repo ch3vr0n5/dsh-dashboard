@@ -261,6 +261,14 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-lifecycle-sessions { display: grid; gap: 8px; }
 .dshd-lifecycle-session { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--dshd-border); border-radius: 8px; }
 .dshd-lifecycle-session > span { color: #62718c; font-size: 12px; }
+.dshd-autonomous-lifecycle { display: grid; gap: 8px; }
+.dshd-autonomous-lifecycle code { color: #344e78; font-size: 11px; overflow-wrap: anywhere; }
+.dshd-autonomous-interrupt { display: grid; gap: 3px; padding: 8px; border: 1px solid #e5b65b; border-radius: 7px; background: #fff9e9; color: #725210; font-size: 11px; }
+.dshd-autonomous-interrupt[data-human="true"] { border-color: #dc9a55; background: #fff4e8; color: #804018; }
+.dshd-autonomous-evidence { display: grid; gap: 4px; padding-top: 2px; color: #63718a; font-size: 11px; }
+.dshd-autonomous-evidence > strong { color: #394b67; }
+.dshd-autonomous-evidence span { overflow-wrap: anywhere; }
+.dshd-autonomous-evidence b { color: #4b5d79; font-weight: 600; }
 .dshd-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; letter-spacing: -.025em; }
 .dshd-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshd-link { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--dshd-blue); display: inline-flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }

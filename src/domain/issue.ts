@@ -59,6 +59,12 @@ export interface TaskIssue {
   readonly updatedAt?: string
   /** Structured transition evidence and actionable gate status for Local cards. */
   readonly userTestGate?: import('../lifecycle/user-test-evidence.ts').UserTestGateView
+  /**
+   * Read-only projection of the reviewed external control-plane event stream.
+   * When no adapter is installed, legacy provider states project through safe
+   * aliases so existing cards remain readable and editable.
+   */
+  readonly autonomousLifecycle?: import('../lifecycle/autonomous.ts').AutonomousLifecycleView
   /** Present in the global composite view; provider adapters never need to set it. */
   readonly origin?: TaskIssueOrigin
 }

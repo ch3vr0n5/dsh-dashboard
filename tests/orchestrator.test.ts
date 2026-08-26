@@ -14,6 +14,7 @@ import type { ProjectCatalog } from '../src/catalog/catalog.ts'
 import type { LifecycleSessionRecord, WorkerSessionRecord } from '../src/catalog/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { DEFAULT_LIFECYCLE_POLICY } from '../src/lifecycle/policy.ts'
+import type { ControlPlaneReadAdapter, ControlPlaneTaskRead } from '../src/lifecycle/autonomous.ts'
 
 interface TestRunningRecord {
   issue: TaskIssue
@@ -47,6 +48,47 @@ interface OrchestratorAccess {
 }
 
 describe('DashboardOrchestrator reconciliation', () => {
+  it('contains a hung control-plane read without blocking provider refresh or scheduler state', async () => {
+    let adapterSignal: AbortSignal | undefined
+    const adapter: ControlPlaneReadAdapter = {
+      readTask: vi.fn(async (_reference, signal) => {
+        adapterSignal = signal
+        return await new Promise<ControlPlaneTaskRead>(() => {})
+      }),
+    }
+    const source = {
+      kind: 'linear',
+      context: () => ({ kind: 'linear', providerLabel: 'Linear', projectLabel: 'ENG', projectRef: 'ENG' }),
+      listBoardIssues: vi.fn(async () => [task('Todo')]),
+      listIssuesByStates: async () => [],
+      getIssuesByNativeRefs: async () => [],
+    } satisfies TaskSource
+    const store = {
+      path: 'WORKFLOW.md', require: () => definition, status: () => ({ current: definition }),
+    } as unknown as WorkflowStore
+    const orchestrator = new DashboardOrchestrator(
+      { logger: { warn: vi.fn() } } as unknown as Context,
+      store,
+      { require: vi.fn(() => source) } as unknown as TaskSourceRegistry,
+      {} as WorkspaceManager,
+      {} as HarnessAgentRunner,
+      emptyCatalog(),
+      {
+        projectId: 'project-1', agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test',
+        controlPlaneReadTimeoutMs: 10,
+      },
+      adapter,
+    )
+
+    await orchestrator.refreshOverview()
+    const projected = (await orchestrator.snapshot()).board.columns.flatMap(column => column.issues)[0]!
+    expect(projected.state.name).toBe('Todo')
+    expect(projected.autonomousLifecycle).toMatchObject({
+      source: 'corrupt-stream', state: 'TRIAGE', integrityWarnings: [expect.stringContaining('timed out')],
+    })
+    expect(adapterSignal?.aborted).toBe(true)
+  })
+
   it('forces a fresh board read after a mutation overlaps an older poll', async () => {
     let releaseFirstRead: (() => void) | undefined
     const firstReadGate = new Promise<void>(accept => { releaseFirstRead = accept })
