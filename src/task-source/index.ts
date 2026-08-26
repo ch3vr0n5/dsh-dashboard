@@ -215,6 +215,14 @@ export class TaskSourceRegistry extends Service {
     ])].sort()
   }
 
+  /** Stable aliases and durable ids available to trusted integration tools. */
+  get scopeIds(): readonly string[] {
+    return [...new Set([
+      ...this.scopedSources.keys(),
+      ...this.scopeAliases.keys(),
+    ])].sort()
+  }
+
   private resolveScope(scope: string): string {
     let current = normalizeScope(scope)
     const visited = new Set<string>()

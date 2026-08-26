@@ -32,8 +32,10 @@ describe('TaskSourceRegistry workspace aliases', () => {
 
     expect(registry.requireScoped('current-workspace', 'local')).toBe(source)
     expect(registry.scopedKinds('current-workspace')).toEqual(['local'])
+    expect(registry.scopeIds).toEqual(['current-workspace', 'project-uuid'])
 
     disposeAlias()
+    expect(registry.scopeIds).toEqual(['project-uuid'])
     expect(() => registry.requireScoped('current-workspace', 'local')).toThrow('known: none')
     disposeSource()
   })

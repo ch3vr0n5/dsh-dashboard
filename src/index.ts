@@ -103,14 +103,17 @@ export function apply(ctx: Context, config: PluginConfig): void {
     parseOptions: { defaults: config.policyDefaults, lifecycleDefaults: config.lifecycleDefaults, agentProfile },
     createRuntime: (project, workflow) => {
       const sources = sourceRegistry.scope(project.id)
-      const disposeCurrentWorkspaceAlias = project.source === 'current-workspace'
-        ? sourceRegistry.aliasScope('current-workspace', project.id)
-        : () => undefined
+      const disposeScopeAliases = [
+        sourceRegistry.aliasScope(`project:${project.name}`, project.id),
+        ...(project.source === 'current-workspace'
+          ? [sourceRegistry.aliasScope('current-workspace', project.id)]
+          : []),
+      ]
       let disposeSources: () => void
       try {
         disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)
       } catch (error) {
-        disposeCurrentWorkspaceAlias()
+        for (const dispose of disposeScopeAliases.toReversed()) dispose()
         throw error
       }
       const workspaces = new WorkspaceManager(
@@ -137,7 +140,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
         orchestrator,
         disposeSources: () => {
           disposeSources()
-          disposeCurrentWorkspaceAlias()
+          for (const dispose of disposeScopeAliases.toReversed()) dispose()
         },
       }
     },
