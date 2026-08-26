@@ -362,7 +362,11 @@ export class DashboardRuntimeCoordinator {
     const worker = async (): Promise<void> => {
       while (nextIndex < projects.length) {
         const project = projects[nextIndex++]
-        if (project !== undefined) await this.ensureContext(project, false)
+        if (project !== undefined) {
+          const context = await this.ensureContext(project, false)
+          const status = context.workflow.status()
+          if (status.current !== undefined && status.error === undefined) this.ensureRuntime(context)
+        }
       }
     }
     await Promise.all(Array.from({ length: Math.min(4, projects.length) }, () => worker()))
@@ -387,7 +391,11 @@ export class DashboardRuntimeCoordinator {
       }
       return
     }
-    if (project.id !== this.activeProjectId) await this.ensureContext(project, false)
+    if (project.id !== this.activeProjectId) {
+      const context = await this.ensureContext(project, false)
+      const status = context.workflow.status()
+      if (status.current !== undefined && status.error === undefined) this.ensureRuntime(context)
+    }
   }
 
   private async ensureContext(project: ProjectRecord, watch: boolean): Promise<ProjectRuntimeContext> {
