@@ -74,4 +74,9 @@ Work the task.`, '/tmp/WORKFLOW.md', options)
     expect(workflow.lifecycle?.state_roles).toEqual({ ready: ['implementation', 'qa'] })
     expect(resolveLifecyclePipeline(workflow.lifecycle!, 'READY', [], 0)).toEqual(['implementation', 'qa'])
   })
+
+  it('applies target-state role routes to legacy provider cards during migration', () => {
+    const policy = { ...DEFAULT_LIFECYCLE_POLICY, enabled: true, state_roles: { implementing: ['implementation', 'qa'] as const } }
+    expect(resolveLifecyclePipeline(policy, 'Working', [], 0)).toEqual(['implementation', 'qa'])
+  })
 })

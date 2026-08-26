@@ -57,6 +57,12 @@ flowchart LR
 
 The Host plugin owns provider access, scheduling, workspaces, hooks, Agent sessions, Project Catalog persistence, local-task persistence, and runtime state. The browser receives a constrained state projection and exposes only pause/resume, stop, refresh, Catalog operations, and Local task mutations.
 
+### Autonomous lifecycle read integration
+
+Dashboard accepts the reviewed `control-plane/v1` lifecycle only through its exported, read-only `ControlPlaneReadAdapter`, supplied as `controlPlane.readAdapter` in host configuration. The adapter supplies append-only task events; Dashboard projects them for card inspection and never reconciles commands, admits work, executes merges, or enables auto-merge. The supported target states are `IDEA`, `TRIAGE`, `PLANNING`, `READY`, `CLAIMED`, `IMPLEMENTING`, `LOCAL_QA`, `PR_OPEN`, `INDEPENDENT_REVIEW`, `REWORK`, `TEST_DEPLOYED`, `ACCEPTANCE_QA`, `MERGE_READY`, `MERGED`, `DONE`, `RECOVERING`, `PAUSED_CAPACITY`, `WAITING_HUMAN`, and `FAILED_POLICY`. Without an adapter, existing provider and Local cards remain available and use stable aliases such as `Backlog → IDEA`, `Ready → READY`, `Working → IMPLEMENTING`, and `User Test → ACCEPTANCE_QA`.
+
+The card inspector exposes the control-plane state, current role, next transition, descriptive task key/slug, exact-head evidence, distinct author/reviewer identities, recovery metadata, and explicit `WAITING_HUMAN` interrupts. PostgreSQL event-store CAS, capacity admission, notifications, and deterministic merge-gate execution remain external integration responsibilities.
+
 ## Requirements
 
 - Node.js `22.19+` or `24+`

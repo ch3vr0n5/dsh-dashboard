@@ -36,6 +36,14 @@ import { resolveWorkspaceRoot } from './workspace/path-safety.ts'
 export { TaskSourceRegistry } from './task-source/index.ts'
 export type { TaskSource } from './task-source/index.ts'
 export type { DashboardSnapshot, IssueDetailView } from './runtime/types.ts'
+export type {
+  AutonomousLifecycleView,
+  AutonomousState,
+  ControlPlaneReadAdapter,
+  ControlPlaneTaskEvent,
+  ControlPlaneTaskRead,
+  ControlPlaneTaskReference,
+} from './lifecycle/autonomous.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-dashboard'
@@ -65,6 +73,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const asanaConfig = config.asana ?? { endpoint: 'https://app.asana.com/api/1.0', tokenRef: 'ASANA_ACCESS_TOKEN' }
   const gitlabConfig = config.gitlab ?? { endpoint: 'https://gitlab.com/api/v4', tokenRef: 'GITLAB_TOKEN' }
   const localConfig = config.local ?? { storePath: '~/.dsh-dashboard/tasks.json' }
+  const controlPlane = config.controlPlane?.readAdapter
+  const controlPlaneReader = controlPlane !== undefined && typeof controlPlane.readTask === 'function' ? controlPlane : undefined
+  if (controlPlane !== undefined && controlPlaneReader === undefined) {
+    ctx.logger.warn('dsh-dashboard: ignoring invalid control-plane read adapter')
+  }
   for (const ref of [
     linearConfig.apiKeyRef,
     githubConfig.tokenRef,
@@ -135,6 +148,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           ...(agentProfile.agentPreset === undefined ? {} : { agentPreset: agentProfile.agentPreset }),
           workerHost: agentProfile.workerHost,
         },
+        controlPlaneReader,
       )
       return {
         orchestrator,

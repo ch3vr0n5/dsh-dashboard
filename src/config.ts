@@ -3,6 +3,7 @@
 import z from '@deepseek-ai/schemastery'
 import type { LifecyclePolicy } from './lifecycle/types.ts'
 import { DEFAULT_LIFECYCLE_POLICY } from './lifecycle/policy.ts'
+import type { ControlPlaneReadAdapter } from './lifecycle/autonomous.ts'
 
 export interface CurrentProjectConfig {
   /** Project root, resolved from the Harness process working directory. */
@@ -45,6 +46,13 @@ export interface Config {
   policyDefaults: PolicyDefaultsConfig
   /** Safe global lifecycle defaults; projects opt in through WORKFLOW.md. */
   lifecycleDefaults: LifecyclePolicy
+  /**
+   * Optional external control-plane/v1 read adapter. Dashboard never receives
+   * a reconciliation or merge capability through this configuration.
+   */
+  controlPlane: {
+    readAdapter: ControlPlaneReadAdapter
+  } | undefined
   discovery: {
     /** Explicit roots seeded into the Catalog; every scanned candidate still requires confirmation. */
     roots: DiscoveryRootConfig[]
@@ -105,6 +113,7 @@ export const Config: z<Config> = z.object({
     maxRetryBackoffMs: 300000,
   }),
   lifecycleDefaults: z.any().default(DEFAULT_LIFECYCLE_POLICY) as z<LifecyclePolicy>,
+  controlPlane: z.any().default(undefined) as z<Config['controlPlane']>,
   discovery: z.object({
     roots: z.array(z.object({
       path: z.string().required(),

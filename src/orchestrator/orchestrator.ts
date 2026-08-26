@@ -29,6 +29,11 @@ import { resolveWorkspaceRoot } from '../workspace/path-safety.ts'
 import { compareCandidates, failureRetryDelay, stateLimit } from './scheduling.ts'
 import { compactHandoff, DEFAULT_LIFECYCLE_POLICY, resolveLifecyclePipeline, resolveLifecycleRoute, rolePrompt } from '../lifecycle/policy.ts'
 import type { LifecycleRole } from '../lifecycle/types.ts'
+import {
+  autonomousTaskIdentity,
+  projectAutonomousLifecycle,
+  type ControlPlaneReadAdapter,
+} from '../lifecycle/autonomous.ts'
 
 interface RunningRecord {
   issue: TaskIssue
@@ -85,6 +90,8 @@ export class DashboardOrchestrator {
     private readonly runner: HarnessAgentRunner,
     private readonly catalog: ProjectCatalog,
     private readonly config: OrchestratorConfig,
+    /** Optional read-only bridge to the reviewed control-plane/v1 event store. */
+    private readonly controlPlane?: ControlPlaneReadAdapter,
   ) {}
 
   /** Start polling immediately; caller owns the returned asynchronous disposer. */
@@ -313,7 +320,8 @@ export class DashboardOrchestrator {
     try {
       const definition = this.workflow.require()
       const source = this.sources.require(definition.tracker.kind)
-      const board = await source.listBoardIssues()
+      const providerBoard = await source.listBoardIssues()
+      const board = await this.projectAutonomousBoard(providerBoard)
       this.board = board
       this.lastRefreshAt = new Date().toISOString()
       this.lastError = undefined
@@ -326,6 +334,35 @@ export class DashboardOrchestrator {
       this.lastError = error instanceof Error ? error.message : String(error)
       this.ctx.logger.warn('dsh-dashboard: poll failed: %s', this.lastError)
     }
+  }
+
+  /**
+   * The adapter is intentionally read-only. A control-plane outage must never
+   * hide a provider card or make an existing installation fail to load.
+   */
+  private async projectAutonomousBoard(board: readonly TaskIssue[]): Promise<readonly TaskIssue[]> {
+    return await Promise.all(board.map(async (issue) => {
+      const identity = autonomousTaskIdentity(issue.identifier, issue.title)
+      let events: readonly import('../lifecycle/autonomous.ts').ControlPlaneTaskEvent[] | undefined
+      if (this.controlPlane !== undefined) {
+        try {
+          const result = await this.controlPlane.readTask({
+            projectId: this.config.projectId,
+            taskKey: identity.taskKey,
+            taskSlug: identity.taskSlug,
+            taskId: `${identity.taskKey}-${identity.taskSlug}`,
+            domain: 'work',
+          })
+          events = result?.events
+        } catch (error) {
+          this.ctx.logger.warn('dsh-dashboard: control-plane read failed for %s: %s', issue.identifier, error instanceof Error ? error.message : String(error))
+        }
+      }
+      return {
+        ...issue,
+        autonomousLifecycle: projectAutonomousLifecycle(issue.identifier, issue.title, issue.state.name, events),
+      }
+    }))
   }
 
   private async reconcileRuntime(board: readonly TaskIssue[], definition: WorkflowDefinition): Promise<void> {

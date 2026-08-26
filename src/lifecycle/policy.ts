@@ -1,4 +1,5 @@
 import type { LifecyclePolicy, LifecycleRole, LifecycleRoute } from './types.ts'
+import { autonomousStateForLegacyState } from './autonomous.ts'
 
 export const DEFAULT_LIFECYCLE_ROUTES: Readonly<Record<LifecycleRole, LifecycleRoute>> = {
   planning: { permission_preset: 'read-only', max_turns: 2 },
@@ -44,7 +45,12 @@ export function resolveLifecyclePipeline(
   // Preserve the pre-delivery fallback for existing version-1 workflows.
   // Delivery is an externally mutating role and must always be opted into by
   // an explicit state_roles entry.
-  const requested = policy.state_roles[normalize(state)] ?? ['planning', 'implementation', 'qa']
+  // Target-state routes work during a gradual migration: a legacy `Working`
+  // card resolves the `IMPLEMENTING` route without changing provider-owned
+  // state names or breaking existing WORKFLOW.md files.
+  const requested = policy.state_roles[normalize(state)]
+    ?? policy.state_roles[normalize(autonomousStateForLegacyState(state))]
+    ?? ['planning', 'implementation', 'qa']
   const highRisk = new Set(policy.high_risk_labels.map(normalize))
   const highRiskIssue = labels.some(label => highRisk.has(normalize(label)))
   // High-risk analysis supplements automated review; it never replaces the

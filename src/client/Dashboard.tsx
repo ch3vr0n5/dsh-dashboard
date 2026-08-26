@@ -1387,6 +1387,7 @@ function IssueInspector({ issue, runtime, lifecycleSessions, onClose, onRefresh,
               <InspectorRow label={t('inspector.provider')}><span>{issue.origin?.providerLabel ?? providerLabel(issue.sourceKind, issue.sourceKind, t)}{issue.origin === undefined ? null : ` · ${issue.origin.contextLabel}`}</span></InspectorRow>
               <InspectorRow label={t('inspector.rawState')}><span>{issue.state.name}</span></InspectorRow>
             </InspectorSection>
+            {issue.autonomousLifecycle === undefined ? null : <AutonomousLifecyclePanel lifecycle={issue.autonomousLifecycle} />}
             {runtime === undefined ? (
               <div className="dshd-inspector-runtime-empty">
                 <MonitorIcon size={20} />
@@ -1671,6 +1672,34 @@ function DeleteTaskDialog({ issue, onClose, onConfirm }: {
 
 function InspectorSection({ title, children, grow = false }: { readonly title: string; readonly children: React.ReactNode; readonly grow?: boolean }) {
   return <section className="dshd-inspector-section" data-grow={grow || undefined}><h2>{title}</h2>{children}</section>
+}
+
+function AutonomousLifecyclePanel({ lifecycle }: { readonly lifecycle: NonNullable<TaskIssue['autonomousLifecycle']> }) {
+  const t = useDashboardTranslation()
+  const evidence = Object.entries(lifecycle.evidence).filter(([, value]) => value !== '')
+  return (
+    <InspectorSection title={t('inspector.autonomousLifecycle')}>
+      <div className="dshd-autonomous-lifecycle" data-source={lifecycle.source}>
+        <InspectorRow label={t('inspector.autonomousState')}><code>{lifecycle.state}</code></InspectorRow>
+        <InspectorRow label={t('inspector.autonomousRole')}><span>{lifecycle.currentRole}</span></InspectorRow>
+        <InspectorRow label={t('inspector.autonomousNext')}><code>{lifecycle.nextTransition ?? '—'}</code></InspectorRow>
+        <InspectorRow label={t('inspector.autonomousTaskKey')}><code>{lifecycle.taskKey}/{lifecycle.taskSlug}</code></InspectorRow>
+        {lifecycle.interrupt === undefined ? null : (
+          <div className="dshd-autonomous-interrupt" data-human={lifecycle.interrupt.requiresHuman || undefined}>
+            <strong>{t('inspector.autonomousInterrupt')} · {lifecycle.interrupt.state}</strong>
+            <span>{lifecycle.interrupt.requiresHuman ? t('inspector.autonomousHumanWait') : lifecycle.interrupt.resumesTo === undefined ? '—' : `→ ${lifecycle.interrupt.resumesTo}`}</span>
+            {lifecycle.interrupt.recoveryAttempt === undefined ? null : <span>{t('inspector.autonomousRecovery', { count: lifecycle.interrupt.recoveryAttempt })}</span>}
+            {lifecycle.interrupt.reason === undefined ? null : <span>{lifecycle.interrupt.reason}</span>}
+          </div>
+        )}
+        <div className="dshd-autonomous-evidence">
+          <strong>{t('inspector.autonomousEvidence')}</strong>
+          {evidence.length === 0 ? <span>{t('inspector.autonomousNoEvidence')}</span> : evidence.map(([field, value]) => <span key={field}><b>{field}</b> {value}</span>)}
+        </div>
+        {lifecycle.integrityWarnings === undefined ? null : <div className="dshd-autonomous-interrupt"><strong>{t('inspector.autonomousIntegrityWarning')}</strong>{lifecycle.integrityWarnings.map(warning => <span key={warning}>{warning}</span>)}</div>}
+      </div>
+    </InspectorSection>
+  )
 }
 
 function InspectorRow({ label, children }: { readonly label: string; readonly children: React.ReactNode }) {
