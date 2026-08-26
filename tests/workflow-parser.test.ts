@@ -143,6 +143,34 @@ Work on the task.
       .toThrow('project.agent_profile "unattended" is not configured')
   })
 
+  it('normalizes lifecycle state-role keys consistently across reloads', () => {
+    const text = workflow(`policy:
+  lifecycle:
+    enabled: true
+    state_roles:
+      " Ready ": [implementation]
+      working: [implementation, qa]
+`)
+
+    expect(parseWorkflow(text, 'WORKFLOW.md', options).lifecycle?.state_roles).toEqual({
+      ready: ['implementation'],
+      working: ['implementation', 'qa'],
+    })
+    expect(parseWorkflow(text, 'WORKFLOW.md', options).lifecycle?.state_roles).toEqual({
+      ready: ['implementation'],
+      working: ['implementation', 'qa'],
+    })
+  })
+
+  it('rejects lifecycle state-role keys that collide after normalization', () => {
+    expect(() => parseWorkflow(workflow(`policy:
+  lifecycle:
+    state_roles:
+      Ready: [implementation]
+      " ready ": [qa]
+`), 'WORKFLOW.md', options)).toThrow('policy.lifecycle.state_roles keys "Ready" and " ready " collide after normalization')
+  })
+
   it.each([
     ['linear', 'WORKFLOW.example.md'],
     ['github', 'examples/WORKFLOW.github.md'],
