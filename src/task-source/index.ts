@@ -115,6 +115,7 @@ declare module '@deepseek-ai/cordis' {
 export class TaskSourceRegistry extends Service {
   private readonly sources = new Map<string, TaskSource>()
   private readonly scopedSources = new Map<string, Map<string, TaskSource>>()
+  private readonly scopeAliases = new Map<string, string>()
 
   constructor(ctx: Context) {
     super(ctx, 'dashboardTaskSources')
@@ -133,9 +134,40 @@ export class TaskSourceRegistry extends Service {
 
   /** Create a project-owned view whose built-ins cannot collide with another project. */
   scope(id: string): ScopedTaskSourceRegistry {
-    const key = id.trim()
-    if (key === '') throw new Error('dsh-dashboard: task source scope id must not be empty')
+    const key = normalizeScope(id)
     return new ScopedTaskSourceRegistry(this, key)
+  }
+
+  /**
+   * Keep a stable integration-facing scope name pointed at a durable Catalog
+   * project id. Catalog project ids survive restarts, while extensions such as
+   * gibb-services intentionally address the selected workspace by role.
+   */
+  aliasScope(alias: string, target: string): () => void {
+    const aliasKey = normalizeScope(alias)
+    const targetKey = normalizeScope(target)
+    if (aliasKey === targetKey) return () => undefined
+    if (this.scopeAliases.has(aliasKey)) {
+      throw new Error(`dsh-dashboard: task source scope alias ${JSON.stringify(aliasKey)} is already registered`)
+    }
+
+    let cursor = targetKey
+    const visited = new Set([aliasKey])
+    while (this.scopeAliases.has(cursor)) {
+      if (visited.has(cursor)) {
+        throw new Error(`dsh-dashboard: task source scope alias ${JSON.stringify(aliasKey)} would create a cycle`)
+      }
+      visited.add(cursor)
+      cursor = this.scopeAliases.get(cursor)!
+    }
+    if (cursor === aliasKey) {
+      throw new Error(`dsh-dashboard: task source scope alias ${JSON.stringify(aliasKey)} would create a cycle`)
+    }
+
+    this.scopeAliases.set(aliasKey, targetKey)
+    return () => {
+      if (this.scopeAliases.get(aliasKey) === targetKey) this.scopeAliases.delete(aliasKey)
+    }
   }
 
   /** Resolve one provider kind or fail with the current catalog. */
@@ -168,18 +200,47 @@ export class TaskSourceRegistry extends Service {
   }
 
   requireScoped(scope: string, kind: string): TaskSource {
-    const source = this.scopedSources.get(scope)?.get(kind) ?? this.sources.get(kind)
+    const resolvedScope = this.resolveScope(scope)
+    const source = this.scopedSources.get(resolvedScope)?.get(kind) ?? this.sources.get(kind)
     if (source !== undefined) return source
     const known = this.scopedKinds(scope)
     throw new Error(`dsh-dashboard: task source ${JSON.stringify(kind)} is not registered for scope ${JSON.stringify(scope)} (known: ${known.join(', ') || 'none'})`)
   }
 
   scopedKinds(scope: string): readonly string[] {
+    const resolvedScope = this.resolveScope(scope)
     return [...new Set([
       ...this.sources.keys(),
-      ...(this.scopedSources.get(scope)?.keys() ?? []),
+      ...(this.scopedSources.get(resolvedScope)?.keys() ?? []),
     ])].sort()
   }
+
+  /** Stable aliases and durable ids available to trusted integration tools. */
+  get scopeIds(): readonly string[] {
+    return [...new Set([
+      ...this.scopedSources.keys(),
+      ...this.scopeAliases.keys(),
+    ])].sort()
+  }
+
+  private resolveScope(scope: string): string {
+    let current = normalizeScope(scope)
+    const visited = new Set<string>()
+    while (this.scopeAliases.has(current)) {
+      if (visited.has(current)) {
+        throw new Error(`dsh-dashboard: task source scope alias cycle at ${JSON.stringify(current)}`)
+      }
+      visited.add(current)
+      current = this.scopeAliases.get(current)!
+    }
+    return current
+  }
+}
+
+function normalizeScope(scope: string): string {
+  const key = scope.trim()
+  if (key === '') throw new Error('dsh-dashboard: task source scope id must not be empty')
+  return key
 }
 
 /** Project-local resolver backed by the one Harness service registry. */

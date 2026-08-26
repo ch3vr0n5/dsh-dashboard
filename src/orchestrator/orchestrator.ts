@@ -1,11 +1,14 @@
 /** Poll, reconcile, claim, dispatch, continue, retry, and observe normalized tasks. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
+import type { LifecycleSessionRecord, WorkerSessionRecord } from '../catalog/types.ts'
 import type { TaskIssue } from '../domain/issue.ts'
 import { hasRequiredLabels, issueKey, normalizedState } from '../domain/issue.ts'
-import type { HarnessAgentRunner } from '../agent/harness-runner.ts'
+import { AgentBlockedError, type AgentRunResult, type HarnessAgentRunner } from '../agent/harness-runner.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   BoardColumn,
   DashboardSnapshot,
@@ -24,6 +27,8 @@ import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { WorkspaceManager } from '../workspace/manager.ts'
 import { resolveWorkspaceRoot } from '../workspace/path-safety.ts'
 import { compareCandidates, failureRetryDelay, stateLimit } from './scheduling.ts'
+import { compactHandoff, DEFAULT_LIFECYCLE_POLICY, resolveLifecyclePipeline, resolveLifecycleRoute, rolePrompt } from '../lifecycle/policy.ts'
+import type { LifecycleRole } from '../lifecycle/types.ts'
 
 interface RunningRecord {
   issue: TaskIssue
@@ -42,6 +47,7 @@ interface RetryRecord {
 }
 
 export interface OrchestratorConfig {
+  readonly projectId: string
   readonly agentProfile: string
   readonly permissionPreset: string
   readonly agentPreset?: string
@@ -69,6 +75,7 @@ export class DashboardOrchestrator {
   private active = true
   private readonly manualStops = new Set<string>()
   private readonly terminalStops = new Set<string>()
+  private readonly holds = new Map<string, { readonly issueRevision: string; readonly reason: string }>()
 
   constructor(
     private readonly ctx: Context,
@@ -169,7 +176,12 @@ export class DashboardOrchestrator {
   stopIssue(key: string): boolean {
     const record = this.running.get(key)
     if (record === undefined) return false
+    const currentIssue = this.board.find(issue => issueKey(issue) === key) ?? record.issue
+    record.issue = currentIssue
     this.manualStops.add(key)
+    void this.hold(currentIssue, 'Agent explicitly stopped from Dashboard').catch(error => {
+      this.ctx.logger.warn('dsh-dashboard: failed to persist explicit stop for %s: %s', currentIssue.identifier, String(error))
+    })
     record.abort.abort(new Error('agent stopped from Dashboard'))
     return true
   }
@@ -276,7 +288,12 @@ export class DashboardOrchestrator {
     const issue = this.board.find(candidate => issueKey(candidate) === key)
     if (issue === undefined) return undefined
     const runtime = this.runtimeArchive.get(key)
-    return { issue, ...(runtime === undefined ? {} : { runtime }) }
+    const lifecycleSessions = this.catalog.lifecycleSessionsFor(this.config.projectId, key)
+    return {
+      issue,
+      ...(runtime === undefined ? {} : { runtime }),
+      ...(lifecycleSessions.length === 0 ? {} : { lifecycleSessions }),
+    }
   }
 
   issueTimeline(key: string, options: TaskTimelineOptions = {}): TaskTimelinePage | undefined {
@@ -326,8 +343,12 @@ export class DashboardOrchestrator {
         this.terminalStops.add(key)
         record.abort.abort(new Error('issue reached a terminal state'))
       } else if (!active.has(normalizedState(current.state.name))) {
-        this.manualStops.add(key)
-        record.abort.abort(new Error('issue left an active state'))
+        // The worker may own this transition (for example Working -> User Test).
+        // Let its current turn close and verify the new state itself so the
+        // durable session ends completed rather than as orchestration-cancelled.
+        record.issue = current
+        record.runtime = { ...record.runtime, state: current.state.name, updatedAt: new Date().toISOString() }
+        this.runtimeArchive.set(key, record.runtime)
       } else {
         record.issue = current
         if (record.runtime.state !== current.state.name) {
@@ -356,7 +377,25 @@ export class DashboardOrchestrator {
     for (const issue of board) {
       const key = issueKey(issue)
       if (this.running.has(key) || this.retries.has(key)) continue
-      if (active.has(normalizedState(issue.state.name)) && !issue.dispatchable) {
+      const hold = this.currentHold(issue)
+      if (hold !== undefined) {
+        const previous = this.runtimeArchive.get(key)
+        const unchanged = previous?.phase === 'blocked' && previous.blocked?.reason === hold.reason
+        const timestamp = unchanged ? previous.updatedAt : new Date().toISOString()
+        this.runtimeArchive.set(key, {
+          key,
+          identifier: issue.identifier,
+          phase: 'blocked',
+          state: issue.state.name,
+          turnCount: previous?.turnCount ?? 0,
+          phaseChangedAt: timestamp,
+          updatedAt: timestamp,
+          workerHost: this.config.workerHost,
+          tokens: previous?.tokens ?? emptyTokens(),
+          blocked: { reason: hold.reason },
+          recentEvents: previous?.recentEvents ?? [],
+        })
+      } else if (active.has(normalizedState(issue.state.name)) && !issue.dispatchable) {
         const previous = this.runtimeArchive.get(key)
         const reason = blockerReason(issue)
         const unchanged = previous?.phase === 'blocked' && previous.blocked?.reason === reason
@@ -400,6 +439,7 @@ export class DashboardOrchestrator {
       .filter(issue => !terminal.has(normalizedState(issue.state.name)))
       .filter(issue => issue.dispatchable)
       .filter(issue => hasRequiredLabels(issue, definition.tracker.required_labels))
+      .filter(issue => this.currentHold(issue) === undefined)
       .filter(issue => !this.running.has(issueKey(issue)))
       .filter((issue) => {
         const retry = this.retries.get(issueKey(issue))
@@ -414,7 +454,8 @@ export class DashboardOrchestrator {
       if (limit !== undefined && (stateCounts.get(state) ?? 0) >= limit) continue
       const retry = this.retries.get(issueKey(issue))
       if (retry !== undefined) this.retries.delete(issueKey(issue))
-      this.launch(issue, definition, retry?.attempt ?? 0)
+      const binding = this.catalog.workerSession(this.config.projectId, issueKey(issue))
+      this.launch(issue, definition, retry?.attempt ?? (binding?.status === 'running' ? binding.failureCount ?? 0 : 0))
       stateCounts.set(state, (stateCounts.get(state) ?? 0) + 1)
     }
   }
@@ -424,6 +465,7 @@ export class DashboardOrchestrator {
     const abort = new AbortController()
     const now = new Date().toISOString()
     const previous = this.runtimeArchive.get(key)
+    const binding = this.catalog.workerSession(this.config.projectId, key)
     const runtime: IssueRuntimeView = {
       key,
       identifier: issue.identifier,
@@ -434,6 +476,7 @@ export class DashboardOrchestrator {
       phaseChangedAt: now,
       updatedAt: now,
       workerHost: this.config.workerHost,
+      ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
       tokens: previous?.tokens ?? emptyTokens(),
       recentEvents: previous?.recentEvents ?? [],
     }
@@ -452,43 +495,18 @@ export class DashboardOrchestrator {
     const key = issueKey(issue)
     let workspacePath: string | undefined
     let afterRunCompleted = false
-    const baselineTokens = record.runtime.tokens
-    const baselineTurnCount = record.runtime.turnCount
-    const baselineEvents = record.runtime.recentEvents
-    const mergeRuntime = (view: IssueRuntimeView): IssueRuntimeView => ({
-      ...view,
-      turnCount: baselineTurnCount + view.turnCount,
-      tokens: addTokens(baselineTokens, view.tokens),
-      recentEvents: [...view.recentEvents, ...baselineEvents].slice(0, 12),
-    })
     try {
       const prepared = await this.workspaces.prepare(issue, definition, abort.signal)
       workspacePath = prepared.path
       await this.workspaces.beforeRun(workspacePath, issue, definition, abort.signal)
-      const result = await this.runner.run({
-        issue,
-        source: this.sources.require(definition.tracker.kind),
-        workflow: definition,
-        workspacePath,
-        attempt,
-        signal: abort.signal,
-        onRuntime: (view) => {
-          const merged = mergeRuntime(view)
-          this.captureTimelineEvent(key, merged.recentEvents[0])
-          record.runtime = merged
-          this.runtimeArchive.set(key, merged)
-        },
-      })
-      const mergedResult = mergeRuntime(result.runtime)
-      record.runtime = mergedResult
-      this.runtimeArchive.set(key, mergedResult)
+      const result = await this.runLifecycle(record, workspacePath)
       if (result.kind === 'terminal') {
         await this.workspaces.afterRun(workspacePath, issue, definition)
         afterRunCompleted = true
         await this.workspaces.remove(result.issue ?? issue, definition)
         this.runtimeArchive.delete(key)
-      } else if (result.kind === 'active') {
-        this.scheduleRetry(record, attempt + 1, 1000, 'agent reached max_turns while the issue remained active')
+      } else if (result.kind === 'exhausted') {
+        await this.hold(record.issue, `Agent reached the cumulative max_turns limit (${definition.agent.max_turns}); revise the card to resume`)
       } else {
         this.runtimeArchive.delete(key)
       }
@@ -504,18 +522,172 @@ export class DashboardOrchestrator {
           this.ctx.logger.warn('dsh-dashboard: terminal workspace cleanup failed for %s: %s', record.issue.identifier, String(removeError))
         })
         this.runtimeArchive.delete(key)
-      } else if (manuallyStopped || this.stopped) {
-        this.runtimeArchive.delete(key)
+      } else if (manuallyStopped) {
+        // stopIssue persisted a revision-bound hold before cancellation.
+      } else if (this.stopped) {
+        // Keep the binding runnable: a replacement plugin process resumes it.
       } else {
         const nextAttempt = attempt + 1
-        const delay = failureRetryDelay(nextAttempt, definition.agent.max_retry_backoff_ms)
-        this.scheduleRetry(record, nextAttempt, delay, error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+        if (error instanceof AgentBlockedError || isPermanentFailure(error) || nextAttempt >= 5) {
+          await this.hold(record.issue, error instanceof AgentBlockedError
+            ? message
+            : `${message} (held after ${nextAttempt} failed attempt${nextAttempt === 1 ? '' : 's'}; revise the card to resume)`)
+        } else {
+          const retryBinding = this.catalog.workerSession(this.config.projectId, key)
+          if (retryBinding?.sessionId !== undefined) await this.saveBinding(record.issue, retryBinding.sessionId, 'running', undefined, nextAttempt)
+          const delay = failureRetryDelay(nextAttempt, definition.agent.max_retry_backoff_ms)
+          this.scheduleRetry(record, nextAttempt, delay, message)
+        }
       }
     } finally {
       if (workspacePath !== undefined && !afterRunCompleted) await this.workspaces.afterRun(workspacePath, issue, definition)
       this.manualStops.delete(key)
       this.terminalStops.delete(key)
     }
+  }
+
+  /** Runs roles serially: at most one workspace-writing role can own a task at once. */
+  private async runLifecycle(record: RunningRecord, workspacePath: string): Promise<AgentRunResult> {
+    const { issue, workflow, attempt, abort } = record
+    const key = issueKey(issue)
+    const source = this.sources.require(workflow.tracker.kind)
+    const lifecycle = workflow.lifecycle ?? DEFAULT_LIFECYCLE_POLICY
+    const legacy = !lifecycle.enabled
+    const binding = this.catalog.workerSession(this.config.projectId, key)
+    if (legacy) {
+      const result = await this.runner.run({
+        issue, source, workflow, workspacePath, attempt,
+        ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
+        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, attempt),
+        signal: abort.signal,
+        onRuntime: view => this.updateRuntime(record, view),
+      })
+      record.runtime = result.runtime
+      this.runtimeArchive.set(key, result.runtime)
+      return result
+    }
+
+    const failureCount = Math.max(binding?.failureCount ?? 0, attempt)
+    const roles = resolveLifecyclePipeline(lifecycle, issue.state.name, issue.labels, failureCount)
+    let aggregate = record.runtime
+    let handoff: string | undefined
+    let last: AgentRunResult | undefined
+    for (const role of roles) {
+      const existing = this.catalog.lifecycleSession(this.config.projectId, key, role)
+      if (existing?.status === 'completed' && existing.issueRevision === issueRevision(issue)) {
+        handoff = existing.handoff ?? handoff
+        continue
+      }
+      const route = resolveLifecycleRoute(lifecycle.roles[role], failureCount)
+      const fallback = this.ctx.agentDefaultModel.currentSelection()
+      const provider = route.provider ?? fallback.provider
+      const model = route.model ?? fallback.model
+      const roleStartedAt = new Date().toISOString()
+      const current: LifecycleSessionRecord = {
+        projectId: this.config.projectId,
+        issueKey: key,
+        role,
+        ...(existing?.sessionId === undefined ? {} : { sessionId: existing.sessionId }),
+        status: 'running',
+        issueRevision: issueRevision(issue),
+        provider,
+        model,
+        ...(route.reasoning_effort === undefined ? {} : { reasoningEffort: route.reasoning_effort }),
+        permissionPreset: route.permission_preset,
+        startedAt: existing?.startedAt ?? roleStartedAt,
+        updatedAt: roleStartedAt,
+        tokens: existing?.tokens ?? emptyTokens(),
+      }
+      await this.catalog.saveLifecycleSession(current)
+      this.projectLifecycleRuntime(record, aggregate, role)
+      const baseline = aggregate
+      const merge = (view: IssueRuntimeView): IssueRuntimeView => ({
+        ...view,
+        turnCount: baseline.turnCount + view.turnCount,
+        tokens: addTokens(baseline.tokens, view.tokens),
+        recentEvents: [...view.recentEvents, ...baseline.recentEvents].slice(0, 12),
+        lifecycle: { activeRole: role, sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) },
+      })
+      try {
+        const result = await this.runner.run({
+          issue, source, workflow, workspacePath, attempt,
+          ...(existing?.sessionId === undefined ? {} : { sessionId: SessionId(existing.sessionId) }),
+          lifecycle: {
+            role,
+            provider,
+            model,
+            ...(route.reasoning_effort === undefined ? {} : { reasoningEffort: route.reasoning_effort }),
+            permissionPreset: route.permission_preset,
+            maxTurns: route.max_turns ?? (role === 'implementation' ? workflow.agent.max_turns : 2),
+            ...(handoff === undefined ? {} : { handoff }),
+            instruction: rolePrompt(role),
+          },
+          onSessionBound: async sessionId => {
+            await this.catalog.saveLifecycleSession({ ...current, sessionId, updatedAt: new Date().toISOString() })
+            await this.saveBinding(issue, sessionId, 'running', undefined, attempt)
+          },
+          signal: abort.signal,
+          onRuntime: view => {
+            const merged = merge(view)
+            record.runtime = merged
+            this.runtimeArchive.set(key, merged)
+            this.captureTimelineEvent(key, merged.recentEvents[0])
+          },
+        })
+        aggregate = merge(result.runtime)
+        const finishedAt = new Date().toISOString()
+        handoff = compactHandoff(result.handoff) ?? handoff
+        const completed: LifecycleSessionRecord = {
+          ...current,
+          ...(existing?.sessionId === undefined ? { sessionId: String(result.runtime.sessionId) } : {}),
+          status: 'completed',
+          updatedAt: finishedAt,
+          finishedAt,
+          runtimeMs: Math.max(0, Date.parse(finishedAt) - Date.parse(roleStartedAt)),
+          tokens: result.runtime.tokens,
+          ...(handoff === undefined ? {} : { handoff }),
+        }
+        await this.catalog.saveLifecycleSession(completed)
+        aggregate = { ...aggregate, lifecycle: { sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) } }
+        record.runtime = aggregate
+        this.runtimeArchive.set(key, aggregate)
+        last = { ...result, runtime: aggregate, ...(handoff === undefined ? {} : { handoff }) }
+        if (result.kind === 'terminal' || result.kind === 'inactive') return last
+        // A role-local exhaustion is completion for planning/QA/review/escalation;
+        // implementation exhaustion remains the existing max-turn safety hold.
+        if (role === 'implementation' && result.kind === 'exhausted') return last
+      } catch (error) {
+        const failedAt = new Date().toISOString()
+        await this.catalog.saveLifecycleSession({
+          ...current,
+          status: 'failed',
+          updatedAt: failedAt,
+          finishedAt: failedAt,
+          runtimeMs: Math.max(0, Date.parse(failedAt) - Date.parse(roleStartedAt)),
+          tokens: aggregate.tokens,
+          error: String(error instanceof Error ? error.message : error).slice(0, 2000),
+        })
+        throw error
+      }
+    }
+    return last ?? { kind: 'inactive', issue, runtime: aggregate, ...(handoff === undefined ? {} : { handoff }) }
+  }
+
+  private updateRuntime(record: RunningRecord, view: IssueRuntimeView): void {
+    record.runtime = view
+    this.runtimeArchive.set(issueKey(record.issue), view)
+    this.captureTimelineEvent(issueKey(record.issue), view.recentEvents[0])
+  }
+
+  private projectLifecycleRuntime(record: RunningRecord, base: IssueRuntimeView, role: LifecycleRole): void {
+    const key = issueKey(record.issue)
+    const runtime: IssueRuntimeView = {
+      ...base,
+      lifecycle: { activeRole: role, sessions: this.catalog.lifecycleSessionsFor(this.config.projectId, key) },
+    }
+    record.runtime = runtime
+    this.runtimeArchive.set(key, runtime)
   }
 
   private captureTimelineEvent(key: string, event: RuntimeEventView | undefined): void {
@@ -554,6 +726,64 @@ export class DashboardOrchestrator {
     this.runtimeArchive.set(key, view)
     this.captureTimelineEvent(key, this.schedulerTimelineEvent('scheduler.retrying', 'Agent retrying', view.updatedAt, error))
     this.ctx.logger.warn('dsh-dashboard: retrying %s in %dms (attempt %d): %s', record.issue.identifier, delayMs, attempt, error)
+  }
+
+  private currentHold(issue: TaskIssue): { readonly issueRevision: string; readonly reason: string } | undefined {
+    const key = issueKey(issue)
+    const revision = issueRevision(issue)
+    const memory = this.holds.get(key)
+    if (memory !== undefined) {
+      if (memory.issueRevision === revision) return memory
+      this.holds.delete(key)
+    }
+    const persisted = this.catalog.workerSession(this.config.projectId, key)
+    if (persisted?.status !== 'held' || persisted.issueRevision !== revision || persisted.holdReason === undefined) return undefined
+    const hold = { issueRevision: persisted.issueRevision, reason: persisted.holdReason }
+    this.holds.set(key, hold)
+    return hold
+  }
+
+  private async hold(issue: TaskIssue, reason: string): Promise<void> {
+    const key = issueKey(issue)
+    const revision = issueRevision(issue)
+    this.holds.set(key, { issueRevision: revision, reason })
+    this.retries.delete(key)
+    const binding = this.catalog.workerSession(this.config.projectId, key)
+    await this.saveBinding(issue, binding?.sessionId, 'held', reason)
+    const previous = this.runtimeArchive.get(key)
+    if (previous !== undefined) {
+      const timestamp = new Date().toISOString()
+      this.runtimeArchive.set(key, {
+        ...previous,
+        phase: 'blocked',
+        state: issue.state.name,
+        phaseChangedAt: timestamp,
+        updatedAt: timestamp,
+        blocked: { reason },
+      })
+    }
+  }
+
+  private async saveBinding(
+    issue: TaskIssue,
+    sessionId: string | undefined,
+    status: WorkerSessionRecord['status'],
+    holdReason?: string,
+    failureCount?: number,
+  ): Promise<void> {
+    const existing = this.catalog.workerSession(this.config.projectId, issueKey(issue))
+    const timestamp = new Date().toISOString()
+    await this.catalog.saveWorkerSession({
+      projectId: this.config.projectId,
+      issueKey: issueKey(issue),
+      ...(sessionId === undefined ? {} : { sessionId }),
+      status,
+      failureCount: failureCount ?? existing?.failureCount ?? 0,
+      issueRevision: issueRevision(issue),
+      ...(holdReason === undefined ? {} : { holdReason }),
+      createdAt: existing?.createdAt ?? timestamp,
+      updatedAt: timestamp,
+    })
   }
 
   private scheduleNext(): void {
@@ -632,6 +862,22 @@ function blockerReason(issue: TaskIssue): string {
     return `Blocked by ${issue.blockedBy.map(item => item.identifier ?? item.nativeRef ?? 'another issue').join(', ')}`
   }
   return 'Not dispatchable under the current tracker routing policy'
+}
+
+function issueRevision(issue: TaskIssue): string {
+  const value = issue.updatedAt ?? JSON.stringify({
+    state: normalizedState(issue.state.name),
+    title: issue.title,
+    description: issue.description ?? null,
+    priority: issue.priority ?? null,
+  })
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function isPermanentFailure(error: unknown): boolean {
+  if (error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError) return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /(?:authentication|authorization|permission denied|invalid (?:config|configuration|workflow)|not configured|unsupported|not found)/iu.test(message)
 }
 
 function runtimeOrder(left: IssueRuntimeView, right: IssueRuntimeView): number {

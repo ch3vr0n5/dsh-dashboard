@@ -1,5 +1,7 @@
 /** Validated WORKFLOW.md configuration and prompt body. */
 
+import type { LifecyclePolicy } from '../lifecycle/types.ts'
+
 export interface WorkflowTracker {
   readonly kind: string
   /** Provider-owned routing fields validated by the selected TaskSource. */
@@ -49,6 +51,7 @@ export interface WorkflowDefinition {
   readonly workspace: WorkflowWorkspace
   readonly hooks: WorkflowHooks
   readonly agent: WorkflowAgent
+  readonly lifecycle?: LifecyclePolicy
   readonly dashboard: WorkflowDashboard
   readonly prompt: string
   readonly sourcePath: string

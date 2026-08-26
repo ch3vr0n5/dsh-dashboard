@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-storage'
 import type {} from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { Config as ConfigSchema, type Config as PluginConfig } from './config.ts'
 import { ProjectCatalog } from './catalog/catalog.ts'
@@ -49,6 +50,7 @@ export const inject = [
   'sessions',
   'storageDomain',
   'tools',
+  'workspaceRegistry',
 ]
 
 /** Public plugin configuration schema. */
@@ -98,10 +100,22 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const providerConfigs = { linearConfig, githubConfig, jiraConfig, asanaConfig, gitlabConfig, localConfig }
   const runtime = new DashboardRuntimeCoordinator(ctx, catalog, {
     initialProject,
-    parseOptions: { defaults: config.policyDefaults, agentProfile },
+    parseOptions: { defaults: config.policyDefaults, lifecycleDefaults: config.lifecycleDefaults, agentProfile },
     createRuntime: (project, workflow) => {
       const sources = sourceRegistry.scope(project.id)
-      const disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)
+      const disposeScopeAliases = [
+        sourceRegistry.aliasScope(`project:${project.name}`, project.id),
+        ...(project.source === 'current-workspace'
+          ? [sourceRegistry.aliasScope('current-workspace', project.id)]
+          : []),
+      ]
+      let disposeSources: () => void
+      try {
+        disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)
+      } catch (error) {
+        for (const dispose of disposeScopeAliases.toReversed()) dispose()
+        throw error
+      }
       const workspaces = new WorkspaceManager(
         ctx,
         agentProfile.workerHost,
@@ -115,13 +129,20 @@ export function apply(ctx: Context, config: PluginConfig): void {
         runner,
         catalog,
         {
+          projectId: project.id,
           agentProfile: agentProfile.id,
           permissionPreset: agentProfile.permissionPreset,
           ...(agentProfile.agentPreset === undefined ? {} : { agentPreset: agentProfile.agentPreset }),
           workerHost: agentProfile.workerHost,
         },
       )
-      return { orchestrator, disposeSources }
+      return {
+        orchestrator,
+        disposeSources: () => {
+          disposeSources()
+          for (const dispose of disposeScopeAliases.toReversed()) dispose()
+        },
+      }
     },
   })
 

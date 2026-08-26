@@ -4,6 +4,7 @@ export type ProjectId = string
 export type RepositoryId = string
 export type DiscoveryRootId = string
 export type CatalogSettingId = 'active-project'
+export type WorkerSessionKey = string
 
 export type WorkspaceStrategy = 'worktree' | 'controlled-directory'
 export type ProjectRegistrationSource = 'current-workspace' | 'manual' | 'discovery'
@@ -42,6 +43,40 @@ export interface RepositoryRecord {
   readonly branch?: string
   readonly createdAt: string
   readonly updatedAt: string
+}
+
+/** Durable ownership of one Harness conversation by one Dashboard card. */
+export interface WorkerSessionRecord {
+  readonly projectId: ProjectId
+  readonly issueKey: string
+  readonly sessionId?: string
+  readonly status: 'running' | 'held'
+  readonly failureCount?: number
+  readonly issueRevision: string
+  readonly holdReason?: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Durable lifecycle role session; additive alongside the legacy card session binding. */
+export interface LifecycleSessionRecord {
+  readonly projectId: ProjectId
+  readonly issueKey: string
+  readonly role: import('../lifecycle/types.ts').LifecycleRole
+  readonly sessionId?: string
+  readonly status: 'running' | 'completed' | 'failed'
+  readonly issueRevision: string
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly permissionPreset: string
+  readonly startedAt: string
+  readonly updatedAt: string
+  readonly finishedAt?: string
+  readonly runtimeMs?: number
+  readonly tokens: import('../runtime/types.ts').TokenTotals
+  readonly handoff?: string
+  readonly error?: string
 }
 
 export interface DiscoveryRootRecord {

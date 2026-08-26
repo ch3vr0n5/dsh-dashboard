@@ -8,6 +8,7 @@ import type {
   RegisterProjectInput,
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
+import type { LifecycleSessionView } from '../lifecycle/types.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -55,6 +56,11 @@ export interface IssueRuntimeView {
     readonly reason: string
   }
   readonly recentEvents: readonly RuntimeEventView[]
+  /** Role-owned sessions are intentionally separate and individually auditable. */
+  readonly lifecycle?: {
+    readonly activeRole?: string
+    readonly sessions: readonly LifecycleSessionView[]
+  }
   /** Present in the global composite view. */
   readonly origin?: TaskIssueOrigin
 }
@@ -133,6 +139,7 @@ export interface DashboardSnapshot {
 export interface IssueDetailView {
   readonly issue: TaskIssue
   readonly runtime?: IssueRuntimeView
+  readonly lifecycleSessions?: readonly LifecycleSessionView[]
 }
 
 export type TaskTimelineCategory = 'task' | 'agent' | 'scheduler' | 'system'

@@ -4,8 +4,22 @@ import { load as loadYaml } from 'js-yaml'
 import { z } from 'zod'
 import type { AgentProfileConfig, PolicyDefaultsConfig } from '../config.ts'
 import type { WorkflowDefinition } from './types.ts'
+import { DEFAULT_LIFECYCLE_ROUTES } from '../lifecycle/policy.ts'
+import type { LifecyclePolicy, LifecycleRole } from '../lifecycle/types.ts'
 
 const nonBlank = z.string().trim().min(1)
+
+const lifecycleRouteSchema = z.object({
+  provider: nonBlank.optional(),
+  model: nonBlank.optional(),
+  reasoning_effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  fallback_provider: nonBlank.optional(),
+  fallback_model: nonBlank.optional(),
+  fallback_reasoning_effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  fallback_after_failures: z.number().int().positive().optional(),
+  permission_preset: nonBlank.optional(),
+  max_turns: z.number().int().positive().optional(),
+}).strict()
 
 const schema = z.object({
   version: z.literal(1),
@@ -40,6 +54,19 @@ const schema = z.object({
       max_turns: z.number().int().positive().optional(),
       max_retry_backoff_ms: z.number().int().positive().optional(),
     }).strict().optional(),
+    lifecycle: z.object({
+      enabled: z.boolean().optional(),
+      state_roles: z.record(z.string(), z.array(z.enum(['planning', 'implementation', 'qa', 'review', 'escalation']))).optional(),
+      roles: z.object({
+        planning: lifecycleRouteSchema.optional(),
+        implementation: lifecycleRouteSchema.optional(),
+        qa: lifecycleRouteSchema.optional(),
+        review: lifecycleRouteSchema.optional(),
+        escalation: lifecycleRouteSchema.optional(),
+      }).strict().optional(),
+      escalate_after_failures: z.number().int().positive().optional(),
+      high_risk_labels: z.array(nonBlank).optional(),
+    }).strict().optional(),
     dashboard: z.object({
       visible_states: z.array(nonBlank).optional(),
     }).strict().optional(),
@@ -48,6 +75,7 @@ const schema = z.object({
 
 export interface WorkflowParseOptions {
   readonly defaults: PolicyDefaultsConfig
+  readonly lifecycleDefaults?: LifecyclePolicy
   readonly agentProfile: AgentProfileConfig
 }
 
@@ -119,12 +147,42 @@ export function parseWorkflow(
       max_turns: value.policy.agent?.max_turns ?? options.defaults.maxTurns,
       max_retry_backoff_ms: value.policy.agent?.max_retry_backoff_ms ?? options.defaults.maxRetryBackoffMs,
     },
+    lifecycle: resolveLifecycle(value.policy.lifecycle, options.lifecycleDefaults ?? { enabled: false, state_roles: {}, roles: DEFAULT_LIFECYCLE_ROUTES, escalate_after_failures: 2, high_risk_labels: ['security', 'high-risk', 'architecture'] }),
     dashboard: {
       visible_states: value.policy.dashboard?.visible_states ?? [],
     },
     prompt,
     sourcePath,
     loadedAt: now.toISOString(),
+  }
+}
+
+function resolveLifecycle(
+  policy: z.infer<typeof schema>['policy']['lifecycle'],
+  defaults: LifecyclePolicy,
+): LifecyclePolicy {
+  const configured = policy ?? {}
+  const roles = {} as Record<LifecycleRole, LifecyclePolicy['roles'][LifecycleRole]>
+  for (const role of ['planning', 'implementation', 'qa', 'review', 'escalation'] as const) {
+    const merged = { ...DEFAULT_LIFECYCLE_ROUTES[role], ...defaults.roles[role], ...(configured.roles?.[role] ?? {}) }
+    roles[role] = {
+      ...(merged.provider === undefined ? {} : { provider: merged.provider }),
+      ...(merged.model === undefined ? {} : { model: merged.model }),
+      ...(merged.reasoning_effort === undefined ? {} : { reasoning_effort: merged.reasoning_effort }),
+      ...(merged.fallback_provider === undefined ? {} : { fallback_provider: merged.fallback_provider }),
+      ...(merged.fallback_model === undefined ? {} : { fallback_model: merged.fallback_model }),
+      ...(merged.fallback_reasoning_effort === undefined ? {} : { fallback_reasoning_effort: merged.fallback_reasoning_effort }),
+      ...(merged.fallback_after_failures === undefined ? {} : { fallback_after_failures: merged.fallback_after_failures }),
+      permission_preset: merged.permission_preset ?? DEFAULT_LIFECYCLE_ROUTES[role].permission_preset,
+      ...(merged.max_turns === undefined ? {} : { max_turns: merged.max_turns }),
+    }
+  }
+  return {
+    enabled: configured.enabled ?? defaults.enabled,
+    state_roles: configured.state_roles ?? defaults.state_roles,
+    roles,
+    escalate_after_failures: configured.escalate_after_failures ?? defaults.escalate_after_failures,
+    high_risk_labels: configured.high_risk_labels ?? defaults.high_risk_labels,
   }
 }
 

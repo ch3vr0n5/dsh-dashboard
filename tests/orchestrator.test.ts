@@ -11,6 +11,8 @@ import type { WorkflowStore } from '../src/workflow/store.ts'
 import type { WorkflowDefinition } from '../src/workflow/types.ts'
 import type { WorkspaceManager } from '../src/workspace/manager.ts'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
+import type { WorkerSessionRecord } from '../src/catalog/types.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 interface TestRunningRecord {
   issue: TaskIssue
@@ -34,8 +36,12 @@ interface OrchestratorAccess {
   readonly runtimeArchive: Map<string, IssueRuntimeView>
   readonly manualStops: Set<string>
   readonly terminalStops: Set<string>
+  readonly holds: Map<string, { readonly issueRevision: string; readonly reason: string }>
+  stopIssue(key: string): boolean
   reconcileRuntime(board: readonly TaskIssue[], definition: WorkflowDefinition): Promise<void>
   execute(record: TestRunningRecord): Promise<void>
+  dispatch(board: readonly TaskIssue[], definition: WorkflowDefinition): void
+  launch(issue: TaskIssue, definition: WorkflowDefinition, attempt: number): void
 }
 
 describe('DashboardOrchestrator reconciliation', () => {
@@ -72,7 +78,7 @@ describe('DashboardOrchestrator reconciliation', () => {
       {} as WorkspaceManager,
       {} as HarnessAgentRunner,
       emptyCatalog(),
-      { agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
+      { projectId: 'project-1', agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
     )
     orchestrator.setPaused(true)
 
@@ -112,7 +118,7 @@ describe('DashboardOrchestrator reconciliation', () => {
       {} as WorkspaceManager,
       {} as HarnessAgentRunner,
       emptyCatalog(),
-      { agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
+      { projectId: 'project-1', agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
     )
     const access = orchestrator as unknown as { dispatch(board: readonly TaskIssue[], workflow: WorkflowDefinition): void }
     const dispatch = vi.spyOn(access, 'dispatch')
@@ -153,7 +159,7 @@ describe('DashboardOrchestrator reconciliation', () => {
       {} as WorkspaceManager,
       {} as HarnessAgentRunner,
       emptyCatalog(),
-      { agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
+      { projectId: 'project-1', agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
     )
     const access = orchestrator as unknown as { dispatch(board: readonly TaskIssue[], workflow: WorkflowDefinition): void }
     const dispatch = vi.spyOn(access, 'dispatch').mockImplementation(() => undefined)
@@ -192,6 +198,18 @@ describe('DashboardOrchestrator reconciliation', () => {
     expect(record.abort.signal.aborted).toBe(false)
     expect(record.issue.state.name).toBe('In Progress')
     expect(record.runtime.state).toBe('In Progress')
+  })
+
+  it('lets an agent-owned transition to an inactive review state finish gracefully', async () => {
+    const fixture = createFixture()
+    const record = runningRecord(task('Todo'))
+    fixture.access.running.set(issueKey(record.issue), record)
+
+    await fixture.access.reconcileRuntime([task('User Test')], definition)
+
+    expect(record.abort.signal.aborted).toBe(false)
+    expect(record.issue.state.name).toBe('User Test')
+    expect(record.runtime.state).toBe('User Test')
   })
 
   it('removes the workspace when a retrying issue is confirmed terminal', async () => {
@@ -261,6 +279,96 @@ describe('DashboardOrchestrator reconciliation', () => {
 
     expect(order).toEqual(['prepare', 'before-run', 'agent', 'after-run', 'remove'])
   })
+
+  it('resumes the same persisted conversation after an orchestrator restart', async () => {
+    const catalog = durableCatalog()
+    const firstRun = vi.fn(async (request: Parameters<HarnessAgentRunner['run']>[0]) => {
+      await request.onSessionBound(SessionId('dsh-dashboard-card-session'))
+      return { kind: 'inactive', runtime: runtime(request.issue, 'running') } satisfies AgentRunResult
+    })
+    const first = createFixture({ catalog, run: firstRun })
+    await first.access.execute(runningRecord(task('Todo', '2026-08-25T01:00:00.000Z')))
+
+    const resumedRun = vi.fn(async (request: Parameters<HarnessAgentRunner['run']>[0]) => (
+      { kind: 'inactive', runtime: runtime(request.issue, 'running') } satisfies AgentRunResult
+    ))
+    const restarted = createFixture({ catalog, run: resumedRun })
+    await restarted.access.execute(runningRecord(task('Todo', '2026-08-25T01:00:00.000Z')))
+
+    expect(resumedRun).toHaveBeenCalledOnce()
+    expect(resumedRun.mock.calls[0]![0].sessionId).toBe('dsh-dashboard-card-session')
+  })
+
+  it('holds explicit stops until the card revision changes', async () => {
+    const catalog = durableCatalog(workerBinding('running', 'old'))
+    const fixture = createFixture({ catalog })
+    const original = task('Todo', '2026-08-25T01:00:00.000Z')
+    const record = runningRecord(original)
+    fixture.access.running.set(issueKey(original), record)
+
+    expect(fixture.access.stopIssue(issueKey(original))).toBe(true)
+    await vi.waitFor(() => {
+      expect(catalog.workerSession('project-1', issueKey(original))).toMatchObject({
+        status: 'held',
+        holdReason: 'Agent explicitly stopped from Dashboard',
+      })
+    })
+    expect(record.abort.signal.aborted).toBe(true)
+  })
+
+  it('holds permanent failures and releases the hold for revised feedback', async () => {
+    const catalog = durableCatalog(workerBinding('running', 'old'))
+    const fixture = createFixture({
+      catalog,
+      run: vi.fn(async () => { throw new TypeError('invalid configuration') }),
+    })
+    const original = task('Todo', '2026-08-25T01:00:00.000Z')
+    await fixture.access.execute(runningRecord(original))
+
+    expect(catalog.workerSession('project-1', issueKey(original))).toMatchObject({
+      sessionId: 'dsh-dashboard-card-session',
+      status: 'held',
+    })
+    expect(fixture.access.retries.size).toBe(0)
+    await fixture.access.reconcileRuntime([original], definition)
+    expect(fixture.access.runtimeArchive.get(issueKey(original))?.phase).toBe('blocked')
+
+    const revised = task('Todo', '2026-08-25T02:00:00.000Z')
+    await fixture.access.reconcileRuntime([revised], definition)
+    const launch = vi.spyOn(fixture.access, 'launch').mockImplementation(() => undefined)
+    fixture.access.dispatch([revised], definition)
+    expect(launch).toHaveBeenCalledOnce()
+  })
+
+  it('durably holds a permanent pre-session hook failure without inventing a session', async () => {
+    const catalog = durableCatalog()
+    const fixture = createFixture({
+      catalog,
+      beforeRun: vi.fn(async () => { throw new TypeError('invalid workflow hook configuration') }),
+    })
+    const issue = task('Todo', '2026-08-25T01:00:00.000Z')
+
+    await fixture.access.execute(runningRecord(issue))
+
+    expect(catalog.workerSession('project-1', issueKey(issue))).toMatchObject({ status: 'held' })
+    expect(catalog.workerSession('project-1', issueKey(issue))?.sessionId).toBeUndefined()
+  })
+
+  it('retries transient failures against the same bound session', async () => {
+    const catalog = durableCatalog(workerBinding('running', 'old'))
+    const run = vi.fn(async (_request: Parameters<HarnessAgentRunner['run']>[0]) => { throw new Error('temporary gateway timeout') })
+    const fixture = createFixture({ catalog, run })
+    const issue = task('Todo', '2026-08-25T01:00:00.000Z')
+
+    await fixture.access.execute(runningRecord(issue))
+
+    expect(run.mock.calls[0]![0].sessionId).toBe('dsh-dashboard-card-session')
+    expect(fixture.access.retries.get(issueKey(issue))).toMatchObject({ attempt: 1 })
+    expect(catalog.workerSession('project-1', issueKey(issue))).toMatchObject({
+      sessionId: 'dsh-dashboard-card-session',
+      failureCount: 1,
+    })
+  })
 })
 
 function createFixture(overrides: {
@@ -269,6 +377,7 @@ function createFixture(overrides: {
   readonly afterRun?: WorkspaceManager['afterRun']
   readonly remove?: WorkspaceManager['remove']
   readonly run?: HarnessAgentRunner['run']
+  readonly catalog?: ProjectCatalog
 } = {}) {
   const source = {
     kind: 'linear',
@@ -291,16 +400,17 @@ function createFixture(overrides: {
     sources,
     workspaces,
     runner,
-    emptyCatalog(),
-    { agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
+    overrides.catalog ?? emptyCatalog(),
+    { projectId: 'project-1', agentProfile: 'default', permissionPreset: 'workspace-write', workerHost: 'test' },
   )
   return { access: orchestrator as unknown as OrchestratorAccess, remove }
 }
 
-function task(state: string): TaskIssue {
+function task(state: string, updatedAt?: string): TaskIssue {
   return {
     sourceKind: 'linear', scopeRef: 'ENG', nativeRef: 'issue-1', identifier: 'ENG-1', title: 'Orchestrate safely',
     state: { name: state }, labels: [], blockedBy: [], dispatchable: true,
+    ...(updatedAt === undefined ? {} : { updatedAt }),
   }
 }
 
@@ -340,5 +450,30 @@ const definition: WorkflowDefinition = {
 function emptyCatalog(): ProjectCatalog {
   return {
     snapshot: () => ({ projects: [], discoveryRoots: [], globalBrokerEnabled: false }),
+    workerSession: () => undefined,
+    saveWorkerSession: async () => {},
+  } as unknown as ProjectCatalog
+}
+
+function workerBinding(status: WorkerSessionRecord['status'], issueRevision: string): WorkerSessionRecord {
+  return {
+    projectId: 'project-1',
+    issueKey: issueKey(task('Todo')),
+    sessionId: 'dsh-dashboard-card-session',
+    status,
+    issueRevision,
+    ...(status === 'held' ? { holdReason: 'held for test' } : {}),
+    createdAt: '2026-08-25T00:00:00.000Z',
+    updatedAt: '2026-08-25T00:00:00.000Z',
+  }
+}
+
+function durableCatalog(initial?: WorkerSessionRecord): ProjectCatalog {
+  const records = new Map<string, WorkerSessionRecord>()
+  if (initial !== undefined) records.set(initial.issueKey, initial)
+  return {
+    snapshot: () => ({ projects: [], discoveryRoots: [], globalBrokerEnabled: false }),
+    workerSession: (_projectId: string, key: string) => records.get(key),
+    saveWorkerSession: async (record: WorkerSessionRecord) => { records.set(record.issueKey, record) },
   } as unknown as ProjectCatalog
 }

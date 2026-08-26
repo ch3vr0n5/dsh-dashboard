@@ -2,7 +2,8 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-workspace'
+import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -19,6 +20,7 @@ import type { IssueRuntimeView, RuntimeEventView, TokenTotals } from '../runtime
 import { emptyTokens } from '../runtime/types.ts'
 import { promptFingerprint, renderIssuePrompt } from '../workflow/prompt.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
+import type { LifecycleRole } from '../lifecycle/types.ts'
 
 export interface HarnessRunnerConfig {
   readonly permissionPreset: string
@@ -32,17 +34,32 @@ export interface AgentRunRequest {
   readonly workflow: WorkflowDefinition
   readonly workspacePath: string
   readonly attempt: number
+  /** Existing card-owned conversation. Absent only for the card's first worker. */
+  readonly sessionId?: SessionId
+  readonly lifecycle?: {
+    readonly role: LifecycleRole
+    readonly provider?: string
+    readonly model?: string
+    readonly reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh'
+    readonly permissionPreset: string
+    readonly maxTurns: number
+    readonly handoff?: string
+    readonly instruction?: string
+  }
+  /** Persist a newly-created conversation before any task prompt is submitted. */
+  readonly onSessionBound: (sessionId: SessionId) => Promise<void>
   readonly signal: AbortSignal
   readonly onRuntime: (view: IssueRuntimeView) => void
 }
 
 export interface AgentRunResult {
-  readonly kind: 'terminal' | 'active' | 'inactive'
+  readonly kind: 'terminal' | 'exhausted' | 'inactive'
   readonly issue?: TaskIssue
   readonly runtime: IssueRuntimeView
+  readonly handoff?: string
 }
 
-/** Creates one Harness Agent per worker interval and continues in the same session up to max_turns. */
+/** Creates or resumes the card-owned Harness Agent and enforces a cumulative turn budget. */
 export class HarnessAgentRunner {
   constructor(private readonly ctx: Context, private readonly config: HarnessRunnerConfig) {
     ctx.permissionPresets.resolve(config.permissionPreset)
@@ -51,8 +68,14 @@ export class HarnessAgentRunner {
   async run(request: AgentRunRequest): Promise<AgentRunResult> {
     const { issue, source, workflow, workspacePath, attempt, signal, onRuntime } = request
     const startedAt = new Date().toISOString()
-    const sessionId = SessionId(`dsh-dashboard-${randomUUID()}`)
-    const selection = this.ctx.agentDefaultModel.currentSelection()
+    const sessionId = request.sessionId ?? SessionId(`dsh-dashboard-${randomUUID()}`)
+    const resumed = request.sessionId !== undefined
+    const inherited = this.ctx.agentDefaultModel.currentSelection()
+    const selection: ModelSelection = request.lifecycle === undefined ? inherited : {
+      provider: request.lifecycle.provider ?? inherited.provider,
+      model: request.lifecycle.model ?? inherited.model,
+      ...(request.lifecycle.reasoningEffort === undefined ? {} : { reasoningEffort: request.lifecycle.reasoningEffort as NonNullable<ModelSelection['reasoningEffort']> }),
+    }
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     const presets = this.ctx.get('agentPresets')
     if (this.config.agentPreset !== undefined && presets === undefined) {
@@ -79,42 +102,59 @@ export class HarnessAgentRunner {
     let handle: AgentHandle | undefined
     let removeEventListener: (() => void) | undefined
     const onAbort = (): void => {
-      handle?.agent.cancel({ kind: 'hook', reason: 'dsh-dashboard orchestration cancelled' })
+      const reason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? 'unknown lifecycle reason')
+      handle?.agent.cancel({ kind: 'hook', reason: `dsh-dashboard orchestration cancelled: ${reason}` })
     }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      handle = await this.ctx.agents.create({
-        sessionId,
-        meta: {
-          cwd: workspacePath,
-          ...(resolvedPreset === undefined ? {} : { agentPreset: resolvedPreset.id }),
-        },
-        agentOptions: { provider: selection.provider, model: selection.model },
-        signal,
-        setup: async (agentCtx) => {
-          if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
-          installModelSelection(agentCtx, selected)
-          this.installTaskSourceTool(agentCtx, source)
-        },
-      })
-      this.ctx.permissionPresets.set(handle.agent.session, this.config.permissionPreset)
+      const permissionPreset = request.lifecycle?.permissionPreset ?? this.config.permissionPreset
+      this.ctx.permissionPresets.resolve(permissionPreset)
+      const setup = async (agentCtx: Context): Promise<void> => {
+        if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
+        installModelSelection(agentCtx, selected)
+        this.installTaskSourceTool(agentCtx, source)
+      }
+      handle = resumed
+        ? await this.ctx.agents.resume({
+            resumeSessionId: sessionId,
+            agentOptions: { provider: selection.provider, model: selection.model },
+            signal,
+            setup,
+          })
+        : await this.ctx.agents.create({
+            sessionId,
+            meta: {
+              cwd: workspacePath,
+              ...(resolvedPreset === undefined ? {} : { agentPreset: resolvedPreset.id }),
+            },
+            agentOptions: { provider: selection.provider, model: selection.model },
+            signal,
+            setup,
+          })
+      if (!resumed) await request.onSessionBound(sessionId)
+      this.ctx.permissionPresets.set(handle.agent.session, permissionPreset)
+      await this.ctx.sessions.flush(handle.agent.session)
+      const taskWorkspace = await this.ctx.workspaceRegistry.create(workspacePath, `${issue.scopeRef} · ${issue.identifier}`)
+      await taskWorkspace.attachSession(sessionId)
+      const completedTurns = sessionTurnCount(handle.agent.session.events)
       removeEventListener = this.ctx.on('session/event', (session, event) => {
         if (session.id !== sessionId) return
-        runtime = projectEvent(runtime, event)
+        runtime = projectEvent(runtime, event, completedTurns)
         onRuntime(runtime)
       })
       await handle.agent.whenIdle()
 
-      for (let turn = 1; turn <= workflow.agent.max_turns; turn += 1) {
+      const maxTurns = request.lifecycle?.maxTurns ?? workflow.agent.max_turns
+      for (let turn = completedTurns + 1; turn <= maxTurns; turn += 1) {
         if (signal.aborted) throw signal.reason
-        const prompt = turn === 1
-          ? await renderIssuePrompt(workflow.prompt, { issue, attempt })
-          : continuationPrompt(turn, workflow.agent.max_turns)
+        const prompt = turn === 1 && !resumed
+          ? lifecyclePrompt(request.lifecycle, await renderIssuePrompt(workflow.prompt, { issue, attempt }))
+          : continuationPrompt(turn, maxTurns)
         this.ctx.logger.info(
           'dsh-dashboard: model input issue=%s turn=%d/%d chars=%d sha256=%s',
           issue.identifier,
           turn,
-          workflow.agent.max_turns,
+          maxTurns,
           prompt.length,
           promptFingerprint(prompt),
         )
@@ -137,20 +177,20 @@ export class HarnessAgentRunner {
         }
 
         const refreshed = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
-        if (refreshed === undefined) return { kind: 'inactive', runtime }
+        if (refreshed === undefined) return withHandoff({ kind: 'inactive', runtime })
         const terminalStates = new Set(workflow.tracker.terminal_states.map(normalizedState))
         if (terminalStates.has(normalizedState(refreshed.state.name))) {
-          return { kind: 'terminal', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } }
+          return withHandoff({ kind: 'terminal', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
         }
         const activeStates = new Set(workflow.tracker.active_states.map(normalizedState))
         if (!activeStates.has(normalizedState(refreshed.state.name))) {
-          return { kind: 'inactive', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } }
+          return withHandoff({ kind: 'inactive', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
         }
         runtime = { ...runtime, state: refreshed.state.name, updatedAt: new Date().toISOString() }
         onRuntime(runtime)
-        if (turn < workflow.agent.max_turns) await abortableDelay(1000, signal)
+        if (turn < maxTurns) await abortableDelay(1000, signal)
       }
-      return { kind: 'active', issue, runtime }
+      return withHandoff({ kind: 'exhausted', issue, runtime })
     } finally {
       signal.removeEventListener('abort', onAbort)
       removeEventListener?.()
@@ -248,7 +288,7 @@ export class AgentBlockedError extends Error {
   }
 }
 
-function projectEvent(current: IssueRuntimeView, event: SessionEvent): IssueRuntimeView {
+function projectEvent(current: IssueRuntimeView, event: SessionEvent, turnOffset = 0): IssueRuntimeView {
   const at = new Date(event.time).toISOString()
   let tokens = current.tokens
   let lastMessage = current.lastMessage
@@ -258,7 +298,7 @@ function projectEvent(current: IssueRuntimeView, event: SessionEvent): IssueRunt
   if (event.type === 'turn/start') {
     title = 'Turn started'
     detail = `Turn ${event.data.turn} started`
-    turnCount = Math.max(turnCount, event.data.turn)
+    turnCount = Math.max(turnCount, event.data.turn - turnOffset)
   } else if (event.type === 'assistant/message') {
     title = 'Assistant message'
     const text = event.data.message.content
@@ -319,6 +359,10 @@ function lastTurnEnd(events: readonly SessionEvent[], firstSeq: number): Session
   return events.filter((event): event is SessionEvent<'turn/end'> => event.seq >= firstSeq && event.type === 'turn/end').at(-1)
 }
 
+function sessionTurnCount(events: readonly SessionEvent[]): number {
+  return events.reduce((maximum, event) => event.type === 'turn/start' ? Math.max(maximum, event.data.turn) : maximum, 0)
+}
+
 function continuationPrompt(turn: number, maxTurns: number): string {
   return [
     'Continue working on the current issue from the existing workspace and conversation state.',
@@ -326,6 +370,23 @@ function continuationPrompt(turn: number, maxTurns: number): string {
     'Do not repeat completed investigation. Re-read the tracker state, continue implementation and validation, and keep the issue workpad current.',
     'Only stop early for a true external blocker or when the issue has left an active state.',
   ].join('\n')
+}
+
+function lifecyclePrompt(lifecycle: AgentRunRequest['lifecycle'], base: string): string {
+  if (lifecycle === undefined) return base
+  return [
+    base,
+    `Dashboard lifecycle role: ${lifecycle.role}.`,
+    lifecycle.instruction ?? '',
+    lifecycle.handoff === undefined ? '' : `Compact prior-role handoff:\n${lifecycle.handoff}`,
+  ].filter(Boolean).join('\n\n')
+}
+
+function withHandoff(result: Omit<AgentRunResult, 'handoff'>): AgentRunResult {
+  return {
+    ...result,
+    ...(result.runtime.lastMessage === undefined ? {} : { handoff: result.runtime.lastMessage }),
+  }
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {

@@ -43,6 +43,20 @@ policy:
       Merging: 1
     max_turns: 20
     max_retry_backoff_ms: 300000
+  lifecycle:
+    # Opt in per project. Routes inherit Harness's default unless provider/model are supplied.
+    enabled: true
+    state_roles:
+      Todo: [planning, implementation, qa]
+      Review: [review]
+    roles:
+      planning: { permission_preset: read-only, max_turns: 2 }
+      implementation: { permission_preset: workspace-write }
+      qa: { permission_preset: workspace-write, max_turns: 3 }
+      review: { permission_preset: read-only, max_turns: 2 }
+      escalation: { permission_preset: read-only, max_turns: 2 }
+    escalate_after_failures: 2
+    high_risk_labels: [security, high-risk, architecture]
   dashboard:
     visible_states:
       - Backlog

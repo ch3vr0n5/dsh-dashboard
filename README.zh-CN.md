@@ -12,8 +12,9 @@
 - 支持 Linear、GitHub Issues、Jira Cloud、Asana 项目、GitLab 项目 Issue，以及不需要凭据的本地任务。
 - 执行确定性的优先级排序、必需标签、全局并发限制和按状态并发限制。
 - 为每个任务创建持久工作区，并执行可配置的 `after_create`、`before_run`、`after_run` 和 `before_remove` 生命周期 Hook。
-- 通过 Harness 原生 Agent 执行任务，并在配置的 turn 上限内续跑同一个 Harness session。
-- 对失败运行执行有上限的指数退避，并在每次派发前重新核对任务源状态。
+- 通过 Harness 原生 Agent 执行任务，并把一个可恢复 session 持久绑定到任务卡，在进程重启和评审周期之间继续使用。
+- 对任务卡 session 累计应用 turn 上限；显式停止、阻塞 turn、永久失败和预算耗尽会保持暂停，直到任务卡被修订。
+- 对瞬态失败在同一 session 中执行有上限的指数退避，并在每次派发前重新核对任务源状态。
 - 在 Harness 原生侧栏中增加 **Dashboard** 入口；Board、Runtime、Projects 和 Configuration 视图展示任务状态、session、workspace、turn、token、Agent 事件、重试、阻塞原因、已注册项目和凭据健康状态。
 - 使用 Harness 存储维护持久化 Project Catalog。项目既可显式注册，也可在受限根目录内扫描发现；扫描候选未经确认绝不会写入 Catalog。
 - 分别建模 Project 与 Git Repository。Git 项目使用 worktree 工作区策略，非 Git 项目使用受控目录；自动任务领取始终关闭。
@@ -222,7 +223,7 @@ GITLAB_TOKEN: glpat_replace_me
 | `policy.hooks.timeout_ms` | 每个生命周期 Hook 独立使用的超时时间。 |
 | `policy.agent.max_concurrent_agents` | 项目的 Agent 并发上限。 |
 | `policy.agent.max_concurrent_agents_by_state` | 各任务源状态可选的独立并发上限。 |
-| `policy.agent.max_turns` | 同一个 Harness session 中允许续跑的最大 turn 数。 |
+| `policy.agent.max_turns` | 任务卡所拥有 Harness session 的累计 turn 预算。 |
 | `policy.agent.max_retry_backoff_ms` | 重试退避时间上限。 |
 | `policy.dashboard.visible_states` | 在 Hidden columns 分组之前显示的看板列。 |
 
@@ -265,6 +266,8 @@ Hook 会在任务工作区内作为受信任的本地命令运行，应当像审
 - 符合条件的任务按优先级、创建时间和标识符排序。
 - 可用时，Linear `blocks` 关系和 Jira “is blocked by” 链接会投影为 blocker。
 - 查询结果中缺失的任务会停止运行，但不会被视为终态，避免暂时的查询或 Provider 变化删除 workspace。
+- 进入评审状态时会让 worker 的当前 turn 正常结束，而不是取消 session；终态仍会立即停止并安全清理。
+- held worker 仅在来源任务卡 revision 变化后恢复，并在反馈周期中保留同一 session、workspace、branch 和任务身份。
 - 文件系统变更前会规范化任务标识符并检查路径包含关系。
 - Workspace root 和任务目录必须是真实目录，不能是符号链接。
 - `before_remove` 结束后会再次解析删除目标；如果 Hook 运行期间 root 或目标发生变化，清理会被拒绝。

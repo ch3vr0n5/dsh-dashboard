@@ -184,6 +184,48 @@ describe('ProjectCatalog', () => {
     await globalRestart.stop()
   })
 
+  it('persists card-owned worker sessions and held revision state across restarts', async () => {
+    const root = await temporaryDirectory()
+    const currentProject = join(root, 'current-project')
+    await mkdir(currentProject)
+    await writeFile(join(currentProject, 'WORKFLOW.md'), '# Current policy\n')
+    const storage = memoryDomain()
+    const bootstrap = {
+      currentProject: { root: currentProject, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    } as const
+    const first = new ProjectCatalog(storage.context, bootstrap, root)
+    await first.start()
+    const projectId = first.activeProject()!.id
+    await first.saveWorkerSession({
+      projectId,
+      issueKey: 'local:demo:issue-1',
+      sessionId: 'dsh-dashboard-card-session',
+      status: 'held',
+      failureCount: 3,
+      issueRevision: 'revision-1',
+      holdReason: 'explicit stop',
+      createdAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T01:00:00.000Z',
+    })
+    await first.stop()
+
+    const restarted = new ProjectCatalog(storage.context, bootstrap, root)
+    await restarted.start()
+    expect(restarted.workerSession(projectId, 'local:demo:issue-1')).toEqual({
+      projectId,
+      issueKey: 'local:demo:issue-1',
+      sessionId: 'dsh-dashboard-card-session',
+      status: 'held',
+      failureCount: 3,
+      issueRevision: 'revision-1',
+      holdReason: 'explicit stop',
+      createdAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T01:00:00.000Z',
+    })
+    await restarted.stop()
+  })
+
   it('caps scan candidates and rejects an aborted scan before doing more work', async () => {
     const root = await temporaryDirectory()
     const currentProject = join(root, 'current-project')

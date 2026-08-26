@@ -258,6 +258,9 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-inspector-row { min-height: 29px; display: grid; grid-template-columns: 115px minmax(0, 1fr); align-items: center; font-size: 11px; }
 .dshd-inspector-row > span { color: #62718c; }
 .dshd-inspector-row > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.dshd-lifecycle-sessions { display: grid; gap: 8px; }
+.dshd-lifecycle-session { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--dshd-border); border-radius: 8px; }
+.dshd-lifecycle-session > span { color: #62718c; font-size: 12px; }
 .dshd-mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; letter-spacing: -.025em; }
 .dshd-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dshd-link { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--dshd-blue); display: inline-flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }

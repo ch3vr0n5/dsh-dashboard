@@ -11,6 +11,9 @@ import type {
   ProjectRecord,
   RepositoryId,
   RepositoryRecord,
+  WorkerSessionKey,
+  WorkerSessionRecord,
+  LifecycleSessionRecord,
 } from './types.ts'
 
 const id = z.uuid()
@@ -61,15 +64,57 @@ export const activeProjectRecordSchema = z.union([
   }).strict(),
 ]) as z.ZodType<ActiveProjectRecord>
 
+export const workerSessionRecordSchema = z.object({
+  // The unregistered current workspace uses the stable synthetic
+  // "current-workspace" id; registered Catalog projects use UUIDs.
+  projectId: nonBlank,
+  issueKey: nonBlank,
+  sessionId: nonBlank.optional(),
+  status: z.union([z.literal('running'), z.literal('held')]),
+  failureCount: z.number().int().nonnegative().optional(),
+  issueRevision: nonBlank,
+  holdReason: nonBlank.optional(),
+  createdAt: timestamp,
+  updatedAt: timestamp,
+}).strict() as z.ZodType<WorkerSessionRecord>
+
+export const lifecycleSessionRecordSchema = z.object({
+  projectId: nonBlank,
+  issueKey: nonBlank,
+  role: z.enum(['planning', 'implementation', 'qa', 'review', 'escalation']),
+  sessionId: nonBlank.optional(),
+  status: z.union([z.literal('running'), z.literal('completed'), z.literal('failed')]),
+  issueRevision: nonBlank,
+  provider: nonBlank,
+  model: nonBlank,
+  reasoningEffort: nonBlank.optional(),
+  permissionPreset: nonBlank,
+  startedAt: timestamp,
+  updatedAt: timestamp,
+  finishedAt: timestamp.optional(),
+  runtimeMs: z.number().int().nonnegative().optional(),
+  tokens: z.object({
+    input: z.number().int().nonnegative(), output: z.number().int().nonnegative(),
+    cacheRead: z.number().int().nonnegative(), cacheWrite: z.number().int().nonnegative(),
+    reasoning: z.number().int().nonnegative(), total: z.number().int().nonnegative(),
+  }).strict(),
+  handoff: nonBlank.optional(),
+  error: nonBlank.optional(),
+}).strict() as z.ZodType<LifecycleSessionRecord>
+
 export const dashboardCatalogDomainSpec = defineDomain({
   name: 'dsh_dashboard',
-  // The settings table is additive: storage-domain initializes an absent
-  // declared table as empty, so existing v0 Catalog media need no migration.
+  // Additive tables are initialized empty by storage-domain, so existing v0
+  // Catalog media need no migration.
+  // Additive table: v0 catalog media continue to open with an empty lifecycle
+  // table, so no destructive or data-rewriting migration is required.
   version: 0,
   tables: {
     projects: domainTable<ProjectId, ProjectRecord>(projectRecordSchema),
     repositories: domainTable<RepositoryId, RepositoryRecord>(repositoryRecordSchema),
     discovery_roots: domainTable<DiscoveryRootId, DiscoveryRootRecord>(discoveryRootRecordSchema),
     settings: domainTable<CatalogSettingId, ActiveProjectRecord>(activeProjectRecordSchema),
+    worker_sessions: domainTable<WorkerSessionKey, WorkerSessionRecord>(workerSessionRecordSchema),
+    lifecycle_sessions: domainTable<string, LifecycleSessionRecord>(lifecycleSessionRecordSchema),
   },
 })
