@@ -57,6 +57,8 @@ export interface TaskIssue {
   readonly dispatchable: boolean
   readonly createdAt?: string
   readonly updatedAt?: string
+  /** Structured transition evidence and actionable gate status for Local cards. */
+  readonly userTestGate?: import('../lifecycle/user-test-evidence.ts').UserTestGateView
   /** Present in the global composite view; provider adapters never need to set it. */
   readonly origin?: TaskIssueOrigin
 }

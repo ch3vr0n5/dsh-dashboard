@@ -56,12 +56,13 @@ const schema = z.object({
     }).strict().optional(),
     lifecycle: z.object({
       enabled: z.boolean().optional(),
-      state_roles: z.record(z.string(), z.array(z.enum(['planning', 'implementation', 'qa', 'review', 'escalation']))).optional(),
+      state_roles: z.record(z.string(), z.array(z.enum(['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation']))).optional(),
       roles: z.object({
         planning: lifecycleRouteSchema.optional(),
         implementation: lifecycleRouteSchema.optional(),
         qa: lifecycleRouteSchema.optional(),
         review: lifecycleRouteSchema.optional(),
+        delivery: lifecycleRouteSchema.optional(),
         escalation: lifecycleRouteSchema.optional(),
       }).strict().optional(),
       escalate_after_failures: z.number().int().positive().optional(),
@@ -163,7 +164,7 @@ function resolveLifecycle(
 ): LifecyclePolicy {
   const configured = policy ?? {}
   const roles = {} as Record<LifecycleRole, LifecyclePolicy['roles'][LifecycleRole]>
-  for (const role of ['planning', 'implementation', 'qa', 'review', 'escalation'] as const) {
+  for (const role of ['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation'] as const) {
     const merged = { ...DEFAULT_LIFECYCLE_ROUTES[role], ...defaults.roles[role], ...(configured.roles?.[role] ?? {}) }
     roles[role] = {
       ...(merged.provider === undefined ? {} : { provider: merged.provider }),

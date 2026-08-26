@@ -11,6 +11,51 @@ afterEach(async () => {
 })
 
 describe('LocalTaskSource', () => {
+  it('keeps a rejected User Test transition in its prior active state and exposes every diagnostic', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-dashboard-local-'))
+    temporaryDirectories.push(directory)
+    const source = new LocalTaskSource({ storePath: join(directory, 'tasks.json') }, () => ({
+      projectId: 'personal', states: ['In Progress', 'Human Review', 'User Test', 'Done'], activeStates: ['In Progress', 'Human Review'], terminalStates: ['Done'],
+    }))
+    const task = await source.createTask({ title: 'Gate this card', state: 'Human Review' })
+
+    await expect(source.updateTask(task.nativeRef, { title: 'Must not partially apply', state: 'User Test' })).rejects.toMatchObject({
+      dashboardCode: 'local.userTestEvidenceMissing',
+      message: expect.stringContaining('- automated review: missing'),
+    })
+    expect((await source.getIssuesByNativeRefs([task.nativeRef]))[0]).toMatchObject({ title: 'Gate this card', state: { name: 'Human Review' } })
+  })
+
+  it('allows User Test only after evidence is appended through the supported Local tool and preserves attempts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-dashboard-local-'))
+    temporaryDirectories.push(directory)
+    const source = new LocalTaskSource({ storePath: join(directory, 'tasks.json') }, () => ({
+      projectId: 'personal', states: ['In Progress', 'Human Review', 'User Test', 'Done'], activeStates: ['In Progress', 'Human Review'], terminalStates: ['Done'],
+    }))
+    const task = await source.createTask({ title: 'Evidence-backed card', state: 'Human Review' })
+    const sha = 'a'.repeat(40)
+    const evidence = {
+      commitSha: sha,
+      automatedTests: { result: 'passed' as const, timestamp: '2026-08-26T06:00:00Z', commitSha: sha },
+      automatedReview: { result: 'passed' as const, timestamp: '2026-08-26T06:05:00Z', commitSha: sha, unresolvedBlockingFindings: 0 },
+      pullRequest: { url: 'https://github.com/ch3vr0n5/dsh-dashboard/pull/2', number: 2, headSha: sha, timestamp: '2026-08-26T06:10:00Z' },
+      deployment: { deployedSha: sha, timestamp: '2026-08-26T06:15:00Z' },
+      liveVerification: { result: 'passed' as const, timestamp: '2026-08-26T06:20:00Z', url: 'http://127.0.0.1:3000/health', verifiedSha: sha },
+    }
+    await source.recordUserTestEvidence(task.nativeRef, { commitSha: sha, automatedTests: evidence.automatedTests }, { role: 'qa', workspaceSha: sha })
+    await source.recordUserTestEvidence(task.nativeRef, { commitSha: sha, automatedReview: evidence.automatedReview }, { role: 'review', workspaceSha: sha })
+    await source.recordUserTestEvidence(task.nativeRef, {
+      commitSha: sha,
+      pullRequest: evidence.pullRequest,
+      deployment: evidence.deployment,
+      liveVerification: evidence.liveVerification,
+    }, { role: 'delivery', workspaceSha: sha })
+
+    const transitioned = await source.updateTask(task.nativeRef, { state: 'User Test' })
+    expect(transitioned).toMatchObject({ state: { name: 'User Test' }, userTestGate: { ready: true, attempts: [{ attempt: 1, commitSha: sha }] } })
+    expect(JSON.stringify(await readFile(source.storePath, 'utf8'))).not.toContain('secret')
+  })
+
   it('serializes concurrent mutations and persists create, edit, state, and delete operations', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-dashboard-local-'))
     temporaryDirectories.push(directory)

@@ -11,12 +11,13 @@ import type { WorkflowStore } from '../src/workflow/store.ts'
 import type { WorkflowDefinition } from '../src/workflow/types.ts'
 import type { WorkspaceManager } from '../src/workspace/manager.ts'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
-import type { WorkerSessionRecord } from '../src/catalog/types.ts'
+import type { LifecycleSessionRecord, WorkerSessionRecord } from '../src/catalog/types.ts'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { DEFAULT_LIFECYCLE_POLICY } from '../src/lifecycle/policy.ts'
 
 interface TestRunningRecord {
   issue: TaskIssue
-  readonly workflow: WorkflowDefinition
+  workflow: WorkflowDefinition
   readonly abort: AbortController
   readonly attempt: number
   runtime: IssueRuntimeView
@@ -40,6 +41,7 @@ interface OrchestratorAccess {
   stopIssue(key: string): boolean
   reconcileRuntime(board: readonly TaskIssue[], definition: WorkflowDefinition): Promise<void>
   execute(record: TestRunningRecord): Promise<void>
+  runLifecycle(record: TestRunningRecord, workspacePath: string): Promise<AgentRunResult>
   dispatch(board: readonly TaskIssue[], definition: WorkflowDefinition): void
   launch(issue: TaskIssue, definition: WorkflowDefinition, attempt: number): void
 }
@@ -333,7 +335,7 @@ describe('DashboardOrchestrator reconciliation', () => {
     await fixture.access.reconcileRuntime([original], definition)
     expect(fixture.access.runtimeArchive.get(issueKey(original))?.phase).toBe('blocked')
 
-    const revised = task('Todo', '2026-08-25T02:00:00.000Z')
+    const revised = { ...task('Todo', '2026-08-25T02:00:00.000Z'), description: 'User supplied concrete retry feedback.' }
     await fixture.access.reconcileRuntime([revised], definition)
     const launch = vi.spyOn(fixture.access, 'launch').mockImplementation(() => undefined)
     fixture.access.dispatch([revised], definition)
@@ -369,6 +371,57 @@ describe('DashboardOrchestrator reconciliation', () => {
       failureCount: 1,
     })
   })
+
+  it('starts a fresh lifecycle attempt after failure without overwriting the prior attempt', async () => {
+    const issue = task('Todo', '2026-08-25T01:00:00.000Z')
+    const prior = lifecycleAttempt(issue, {
+      attemptId: 'attempt-1', sessionId: 'session-1', status: 'failed',
+      startedAt: '2026-08-25T00:00:00.000Z', updatedAt: '2026-08-25T00:05:00.000Z',
+      finishedAt: '2026-08-25T00:05:00.000Z', error: 'interrupted',
+    })
+    const catalog = lifecycleCatalog([prior])
+    const run = vi.fn(async (request: Parameters<HarnessAgentRunner['run']>[0]) => ({
+      kind: 'exhausted' as const,
+      runtime: { ...runtime(request.issue, 'running'), sessionId: SessionId('session-2') },
+      handoff: 'Implementation complete; tests pass.',
+    }))
+    const fixture = createFixture({ catalog, run })
+    const record = runningRecord(issue)
+    record.workflow = lifecycleDefinition
+
+    await fixture.access.runLifecycle(record, 'C:\\workspace\\ENG-1')
+
+    expect(run.mock.calls[0]![0].sessionId).toBeUndefined()
+    const attempts = catalog.lifecycleSessionsFor('project-1', issueKey(issue))
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).toMatchObject({ attemptId: 'attempt-1', sessionId: 'session-1', status: 'failed' })
+    expect(attempts[1]).toMatchObject({ sessionId: 'session-2', status: 'completed', handoff: 'Implementation complete; tests pass.' })
+    expect(attempts[1]?.attemptId).not.toBe('attempt-1')
+    expect(attempts[1]?.startedAt).not.toBe(prior.startedAt)
+  })
+
+  it('records a lifecycle role as failed when it ends without a compact handoff', async () => {
+    const issue = task('Todo', '2026-08-25T01:00:00.000Z')
+    const catalog = lifecycleCatalog()
+    const fixture = createFixture({
+      catalog,
+      run: vi.fn(async request => {
+        await request.onSessionBound(SessionId('interrupted-session'))
+        return { kind: 'exhausted' as const, runtime: runtime(request.issue, 'running') }
+      }),
+    })
+    const record = runningRecord(issue)
+    record.workflow = lifecycleDefinition
+
+    await expect(fixture.access.runLifecycle(record, 'C:\\workspace\\ENG-1')).rejects.toThrow(
+      'lifecycle role implementation ended without a compact handoff',
+    )
+    expect(catalog.lifecycleSession('project-1', issueKey(issue), 'implementation')).toMatchObject({
+      status: 'failed',
+      sessionId: 'interrupted-session',
+      error: 'lifecycle role implementation ended without a compact handoff',
+    })
+  })
 })
 
 function createFixture(overrides: {
@@ -395,7 +448,10 @@ function createFixture(overrides: {
   const runner = { run } as unknown as HarnessAgentRunner
   const sources = { require: vi.fn(() => source) } as unknown as TaskSourceRegistry
   const orchestrator = new DashboardOrchestrator(
-    { logger: { warn: vi.fn() } } as unknown as Context,
+    {
+      logger: { warn: vi.fn() },
+      agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'test-model' }) },
+    } as unknown as Context,
     {} as WorkflowStore,
     sources,
     workspaces,
@@ -447,6 +503,15 @@ const definition: WorkflowDefinition = {
   loadedAt: new Date(0).toISOString(),
 }
 
+const lifecycleDefinition: WorkflowDefinition = {
+  ...definition,
+  lifecycle: {
+    ...DEFAULT_LIFECYCLE_POLICY,
+    enabled: true,
+    state_roles: { todo: ['implementation'] },
+  },
+}
+
 function emptyCatalog(): ProjectCatalog {
   return {
     snapshot: () => ({ projects: [], discoveryRoots: [], globalBrokerEnabled: false }),
@@ -475,5 +540,34 @@ function durableCatalog(initial?: WorkerSessionRecord): ProjectCatalog {
     snapshot: () => ({ projects: [], discoveryRoots: [], globalBrokerEnabled: false }),
     workerSession: (_projectId: string, key: string) => records.get(key),
     saveWorkerSession: async (record: WorkerSessionRecord) => { records.set(record.issueKey, record) },
+  } as unknown as ProjectCatalog
+}
+
+function lifecycleAttempt(issue: TaskIssue, overrides: Partial<LifecycleSessionRecord>): LifecycleSessionRecord {
+  return {
+    projectId: 'project-1', issueKey: issueKey(issue), role: 'implementation', status: 'running',
+    issueRevision: '2026-08-25T01:00:00.000Z', provider: 'test', model: 'test-model',
+    permissionPreset: 'workspace-write', startedAt: '2026-08-25T00:00:00.000Z',
+    updatedAt: '2026-08-25T00:00:00.000Z', tokens: emptyTokens(), ...overrides,
+  }
+}
+
+function lifecycleCatalog(initial: readonly LifecycleSessionRecord[] = []): ProjectCatalog {
+  const records = [...initial]
+  return {
+    snapshot: () => ({ projects: [], discoveryRoots: [], globalBrokerEnabled: false }),
+    workerSession: () => undefined,
+    saveWorkerSession: async () => {},
+    lifecycleSessionsFor: (_projectId: string, key: string) => records
+      .filter(record => record.issueKey === key)
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+    lifecycleSession: (_projectId: string, key: string, role: LifecycleSessionRecord['role']) => records
+      .filter(record => record.issueKey === key && record.role === role)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0],
+    saveLifecycleSession: async (record: LifecycleSessionRecord) => {
+      const index = records.findIndex(candidate => candidate.attemptId === record.attemptId)
+      if (index === -1) records.push(record)
+      else records[index] = record
+    },
   } as unknown as ProjectCatalog
 }

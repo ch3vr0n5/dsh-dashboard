@@ -63,6 +63,8 @@ export interface LifecycleSessionRecord {
   readonly projectId: ProjectId
   readonly issueKey: string
   readonly role: import('../lifecycle/types.ts').LifecycleRole
+  /** Stable identity for one role attempt; absent only on legacy records. */
+  readonly attemptId?: string
   readonly sessionId?: string
   readonly status: 'running' | 'completed' | 'failed'
   readonly issueRevision: string

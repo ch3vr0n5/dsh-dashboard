@@ -5,6 +5,16 @@ import { DashboardDomainError, decodeDashboardError } from '../src/runtime/error
 import type { DashboardRuntimeCoordinator } from '../src/runtime/coordinator.ts'
 
 describe('Dashboard RPC project switching', () => {
+  it('does not expose User Test evidence writes over the generic Dashboard RPC', async () => {
+    const recordUserTestEvidence = vi.fn(async () => undefined)
+    const runtime = { recordUserTestEvidence } as unknown as DashboardRuntimeCoordinator
+    const result = await handleDashboardRpc(runtime, 'recordUserTestEvidence', {
+      nativeRef: 'task-1', evidence: { commitSha: 'short', automatedTests: {} },
+    }, new AbortController().signal)
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('unknown Dashboard endpoint') } })
+    expect(recordUserTestEvidence).not.toHaveBeenCalled()
+  })
+
   it('loads a validated timeline page without refreshing the Dashboard snapshot', async () => {
     const page = { events: [], coverage: 'provider-summary', truncated: false } as const
     const issueTimeline = vi.fn(() => page)

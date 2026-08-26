@@ -280,9 +280,11 @@ See [Security](./docs/security.md) and [Architecture](./docs/architecture.md) fo
 
 ### Lifecycle model routing
 
-Projects can opt into explicit lifecycle roles in `WORKFLOW.md`. Each role gets a separate durable Harness session and permission preset; only one role is active for a card at a time. The Dashboard persists role, session, provider/model, reasoning effort, permission preset, token totals, runtime, and a compact handoff artifact. Planner/reviewer/escalation roles should be read-only; implementation and QA may use workspace-write. The next role receives only the compact handoff and current repository state, never an expensive full prior transcript. A role never merges or enables auto-merge.
+Projects can opt into explicit lifecycle roles in `WORKFLOW.md`. Each role gets a separate durable Harness session and permission preset; only one role is active for a card at a time. The Dashboard persists role, session, provider/model, reasoning effort, permission preset, token totals, runtime, and a compact handoff artifact. Planner/reviewer/escalation roles should be read-only; implementation, QA, and delivery may use workspace-write. The next role receives only the compact handoff and current repository state, never an expensive full prior transcript. A role never merges or enables auto-merge.
 
 `policy.lifecycle.roles` is project configuration, so a deployment can use Claude, DeepSeek, or another configured provider without Dashboard code changes. `state_roles` selects the ordered pipeline per tracker state. Repeated failures insert `escalation` before unfinished writer work, and configured high-risk labels route review through that same high-reasoning role.
+
+For Local Harness/plugin cards, `User Test` is enforced at the task-source mutation boundary, including Dashboard RPC and the Agent's `local_task` tool. Card prose cannot satisfy the gate. The current evidence attempt must contain passing automated tests and automated review for one full Git SHA, zero unresolved blocking findings, a PR URL/number whose head is that SHA, deployment of that SHA, and passing live verification of that SHA with a timestamp and non-secret-bearing URL. Evidence timestamps must follow the test/review → PR observation → deployment → live-verification order. Every evidence write appends an immutable revision; a changed commit starts a clean attempt while preserving history. Personal and Work deployments use the same contract: implementation → QA → review → delivery, and manual testing begins only after the PR exists.
 
 ## Dashboard
 

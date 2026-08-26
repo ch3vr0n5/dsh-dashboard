@@ -1,6 +1,6 @@
 /** Explicit, durable model/permission routing for Dashboard task phases. */
 
-export const lifecycleRoles = ['planning', 'implementation', 'qa', 'review', 'escalation'] as const
+export const lifecycleRoles = ['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation'] as const
 export type LifecycleRole = (typeof lifecycleRoles)[number]
 
 export interface LifecycleRoute {
@@ -39,6 +39,8 @@ export interface LifecycleSessionRecord {
   readonly projectId: string
   readonly issueKey: string
   readonly role: LifecycleRole
+  /** Stable identity for one role attempt; absent only on legacy records. */
+  readonly attemptId?: string
   readonly sessionId?: string
   readonly status: 'running' | 'completed' | 'failed'
   readonly issueRevision: string

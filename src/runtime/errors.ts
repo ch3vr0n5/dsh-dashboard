@@ -23,6 +23,8 @@ export type DashboardErrorCode =
   | 'local.taskNotFound'
   | 'local.titleEmpty'
   | 'local.titleTooLong'
+  | 'local.userTestEvidenceInvalid'
+  | 'local.userTestEvidenceMissing'
   | 'local.workflowStatesMissing'
   | 'global.readOnly'
   | 'project.workflowInvalid'
