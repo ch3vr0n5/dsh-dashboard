@@ -6,6 +6,7 @@ import type { AgentProfileConfig, PolicyDefaultsConfig } from '../config.ts'
 import type { WorkflowDefinition } from './types.ts'
 import { DEFAULT_LIFECYCLE_ROUTES } from '../lifecycle/policy.ts'
 import type { LifecyclePolicy, LifecycleRole } from '../lifecycle/types.ts'
+import { normalizedState } from '../domain/issue.ts'
 
 const nonBlank = z.string().trim().min(1)
 
@@ -180,11 +181,30 @@ function resolveLifecycle(
   }
   return {
     enabled: configured.enabled ?? defaults.enabled,
-    state_roles: configured.state_roles ?? defaults.state_roles,
+    state_roles: normalizeLifecycleStateRoles(configured.state_roles ?? defaults.state_roles),
     roles,
     escalate_after_failures: configured.escalate_after_failures ?? defaults.escalate_after_failures,
     high_risk_labels: configured.high_risk_labels ?? defaults.high_risk_labels,
   }
+}
+
+function normalizeLifecycleStateRoles(
+  stateRoles: LifecyclePolicy['state_roles'],
+): LifecyclePolicy['state_roles'] {
+  const normalized: Record<string, readonly LifecycleRole[]> = {}
+  const originalKeys = new Map<string, string>()
+  for (const [state, roles] of Object.entries(stateRoles)) {
+    const key = normalizedState(state)
+    const previous = originalKeys.get(key)
+    if (previous !== undefined) {
+      throw new Error(
+        `WORKFLOW.md configuration is invalid: policy.lifecycle.state_roles keys ${JSON.stringify(previous)} and ${JSON.stringify(state)} collide after normalization`,
+      )
+    }
+    originalKeys.set(key, state)
+    normalized[key] = roles
+  }
+  return normalized
 }
 
 function normalizeProvider(kindValue: string, value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
