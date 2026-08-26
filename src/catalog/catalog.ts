@@ -178,13 +178,15 @@ export class ProjectCatalog {
   }
 
   lifecycleSession(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): LifecycleSessionRecord | undefined {
-    const record = this.requireLifecycleSessions().get(lifecycleSessionKey(projectId, issueKey, role))
+    const record = this.lifecycleSessionsFor(projectId, issueKey)
+      .filter(candidate => candidate.role === role)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     return record === undefined ? undefined : { ...record, tokens: { ...record.tokens } }
   }
 
   async saveLifecycleSession(record: LifecycleSessionRecord): Promise<void> {
     await this.enqueueMutation(async () => {
-      await this.requireLifecycleSessions().put(lifecycleSessionKey(record.projectId, record.issueKey, record.role), record)
+      await this.requireLifecycleSessions().put(lifecycleSessionKey(record.projectId, record.issueKey, record.role, record.attemptId), record)
     })
   }
 
@@ -494,8 +496,8 @@ function workerSessionKey(projectId: ProjectId, issueKey: string): string {
   return `${projectId}:${issueKey}`
 }
 
-function lifecycleSessionKey(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): string {
-  return `${projectId}:${issueKey}:${role}`
+function lifecycleSessionKey(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role'], attemptId?: string): string {
+  return `${projectId}:${issueKey}:${role}${attemptId === undefined ? '' : `:${attemptId}`}`
 }
 
 interface ProjectInspection {

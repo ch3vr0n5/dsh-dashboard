@@ -1,7 +1,7 @@
 /** Poll, reconcile, claim, dispatch, continue, retry, and observe normalized tasks. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
 import type { LifecycleSessionRecord, WorkerSessionRecord } from '../catalog/types.ts'
@@ -575,29 +575,34 @@ export class DashboardOrchestrator {
     let last: AgentRunResult | undefined
     for (const role of roles) {
       const existing = this.catalog.lifecycleSession(this.config.projectId, key, role)
-      if (existing?.status === 'completed' && existing.issueRevision === issueRevision(issue)) {
-        handoff = existing.handoff ?? handoff
+      const existingHandoff = compactHandoff(existing?.handoff)
+      if (existing?.status === 'completed' && existing.issueRevision === issueRevision(issue) && existingHandoff !== undefined) {
+        handoff = existingHandoff
         continue
       }
+      const resumable = existing?.status === 'running' && existing.issueRevision === issueRevision(issue)
+        ? existing
+        : undefined
       const route = resolveLifecycleRoute(lifecycle.roles[role], failureCount)
       const fallback = this.ctx.agentDefaultModel.currentSelection()
       const provider = route.provider ?? fallback.provider
       const model = route.model ?? fallback.model
       const roleStartedAt = new Date().toISOString()
-      const current: LifecycleSessionRecord = {
+      let current: LifecycleSessionRecord = {
         projectId: this.config.projectId,
         issueKey: key,
         role,
-        ...(existing?.sessionId === undefined ? {} : { sessionId: existing.sessionId }),
+        attemptId: resumable?.attemptId ?? randomUUID(),
+        ...(resumable?.sessionId === undefined ? {} : { sessionId: resumable.sessionId }),
         status: 'running',
         issueRevision: issueRevision(issue),
         provider,
         model,
         ...(route.reasoning_effort === undefined ? {} : { reasoningEffort: route.reasoning_effort }),
         permissionPreset: route.permission_preset,
-        startedAt: existing?.startedAt ?? roleStartedAt,
+        startedAt: resumable?.startedAt ?? roleStartedAt,
         updatedAt: roleStartedAt,
-        tokens: existing?.tokens ?? emptyTokens(),
+        tokens: resumable?.tokens ?? emptyTokens(),
       }
       await this.catalog.saveLifecycleSession(current)
       this.projectLifecycleRuntime(record, aggregate, role)
@@ -612,7 +617,7 @@ export class DashboardOrchestrator {
       try {
         const result = await this.runner.run({
           issue, source, workflow, workspacePath, attempt,
-          ...(existing?.sessionId === undefined ? {} : { sessionId: SessionId(existing.sessionId) }),
+          ...(resumable?.sessionId === undefined ? {} : { sessionId: SessionId(resumable.sessionId) }),
           lifecycle: {
             role,
             provider,
@@ -624,7 +629,8 @@ export class DashboardOrchestrator {
             instruction: rolePrompt(role),
           },
           onSessionBound: async sessionId => {
-            await this.catalog.saveLifecycleSession({ ...current, sessionId, updatedAt: new Date().toISOString() })
+            current = { ...current, sessionId, updatedAt: new Date().toISOString() }
+            await this.catalog.saveLifecycleSession(current)
             await this.saveBinding(issue, sessionId, 'running', undefined, attempt)
           },
           signal: abort.signal,
@@ -637,14 +643,18 @@ export class DashboardOrchestrator {
         })
         aggregate = merge(result.runtime)
         const finishedAt = new Date().toISOString()
-        handoff = compactHandoff(result.handoff) ?? handoff
+        const roleHandoff = compactHandoff(result.handoff)
+        if (roleHandoff === undefined) {
+          throw new Error(`lifecycle role ${role} ended without a compact handoff`)
+        }
+        handoff = roleHandoff
         const completed: LifecycleSessionRecord = {
           ...current,
-          ...(existing?.sessionId === undefined ? { sessionId: String(result.runtime.sessionId) } : {}),
+          ...(result.runtime.sessionId === undefined ? {} : { sessionId: String(result.runtime.sessionId) }),
           status: 'completed',
           updatedAt: finishedAt,
           finishedAt,
-          runtimeMs: Math.max(0, Date.parse(finishedAt) - Date.parse(roleStartedAt)),
+          runtimeMs: Math.max(0, Date.parse(finishedAt) - Date.parse(current.startedAt)),
           tokens: result.runtime.tokens,
           ...(handoff === undefined ? {} : { handoff }),
         }
@@ -664,7 +674,7 @@ export class DashboardOrchestrator {
           status: 'failed',
           updatedAt: failedAt,
           finishedAt: failedAt,
-          runtimeMs: Math.max(0, Date.parse(failedAt) - Date.parse(roleStartedAt)),
+          runtimeMs: Math.max(0, Date.parse(failedAt) - Date.parse(current.startedAt)),
           tokens: aggregate.tokens,
           error: String(error instanceof Error ? error.message : error).slice(0, 2000),
         })

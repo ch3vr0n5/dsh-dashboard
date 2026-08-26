@@ -88,6 +88,35 @@ describe('HarnessAgentRunner card-owned sessions', () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ agentOptions: { provider: 'claude-code-worker', model: 'claude-opus-5' } }))
     expect(permissions.set).toHaveBeenCalledWith(expect.anything(), 'read-only')
   })
+
+  it('does not create or resume a session when the source card is already inactive', async () => {
+    const create = vi.fn()
+    const resume = vi.fn()
+    const runner = new HarnessAgentRunner(context(create, resume), runnerConfig)
+
+    const result = await runner.run(request({
+      source: taskSource(() => issue('User Test')),
+    }))
+
+    expect(result).toMatchObject({ kind: 'inactive', issue: { state: { name: 'User Test' } } })
+    expect(create).not.toHaveBeenCalled()
+    expect(resume).not.toHaveBeenCalled()
+  })
+
+  it('re-reads the source before a continuation and does not send a second prompt after the card leaves an active state', async () => {
+    const prompts: string[] = []
+    const create = vi.fn(async () => fakeHandle([], [], prompts))
+    const runner = new HarnessAgentRunner(context(create, vi.fn()), runnerConfig)
+    let reads = 0
+
+    const result = await runner.run(request({
+      source: taskSource(() => issue(++reads >= 4 ? 'User Test' : 'Todo')),
+    }))
+
+    expect(result).toMatchObject({ kind: 'inactive', issue: { state: { name: 'User Test' } } })
+    expect(prompts).toHaveLength(1)
+    expect(reads).toBe(4)
+  })
 })
 
 function context(create: ReturnType<typeof vi.fn>, resume: ReturnType<typeof vi.fn>, order: string[] = [], permissions = { resolve: vi.fn(), set: vi.fn() }): Context {
@@ -155,7 +184,7 @@ function abortedTurn(turn: number, seq = 0): SessionEvent[] {
 function request(overrides: Partial<Parameters<HarnessAgentRunner['run']>[0]> = {}): Parameters<HarnessAgentRunner['run']>[0] {
   return {
     issue: issue('Todo'),
-    source,
+    source: oneTurnSource(),
     workflow,
     workspacePath: '/workspace/task',
     attempt: 0,
@@ -173,12 +202,19 @@ function issue(state: string): TaskIssue {
   }
 }
 
-const source: TaskSource = {
-  kind: 'local',
-  context: () => ({ kind: 'local', providerLabel: 'Local', projectLabel: 'demo', projectRef: 'demo' }),
-  listBoardIssues: async () => [],
-  listIssuesByStates: async () => [],
-  getIssuesByNativeRefs: async () => [issue('User Test')],
+function oneTurnSource(): TaskSource {
+  let reads = 0
+  return taskSource(() => issue(++reads >= 3 ? 'User Test' : 'Todo'))
+}
+
+function taskSource(current: () => TaskIssue): TaskSource {
+  return {
+    kind: 'local',
+    context: () => ({ kind: 'local', providerLabel: 'Local', projectLabel: 'demo', projectRef: 'demo' }),
+    listBoardIssues: async () => [],
+    listIssuesByStates: async () => [],
+    getIssuesByNativeRefs: async () => [current()],
+  }
 }
 
 const workflow: WorkflowDefinition = {

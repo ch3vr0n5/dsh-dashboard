@@ -39,6 +39,8 @@ export interface LifecycleSessionRecord {
   readonly projectId: string
   readonly issueKey: string
   readonly role: LifecycleRole
+  /** Stable identity for one role attempt; absent only on legacy records. */
+  readonly attemptId?: string
   readonly sessionId?: string
   readonly status: 'running' | 'completed' | 'failed'
   readonly issueRevision: string

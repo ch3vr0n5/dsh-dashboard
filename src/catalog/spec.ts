@@ -82,6 +82,7 @@ export const lifecycleSessionRecordSchema = z.object({
   projectId: nonBlank,
   issueKey: nonBlank,
   role: z.enum(['planning', 'implementation', 'qa', 'review', 'escalation']),
+  attemptId: nonBlank.optional(),
   sessionId: nonBlank.optional(),
   status: z.union([z.literal('running'), z.literal('completed'), z.literal('failed')]),
   issueRevision: nonBlank,

@@ -99,6 +99,14 @@ export class HarnessAgentRunner {
     }
     onRuntime(runtime)
 
+    // A dispatch snapshot can become stale while a workspace is prepared or a
+    // replacement plugin process is starting.  Validate the source before we
+    // create/resume a conversation so an inactive card cannot receive a new
+    // worker session.
+    const initial = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
+    const initialResult = classifyRefreshedIssue(initial, workflow, runtime)
+    if (initialResult !== undefined) return initialResult
+
     let handle: AgentHandle | undefined
     let removeEventListener: (() => void) | undefined
     const onAbort = (): void => {
@@ -147,6 +155,12 @@ export class HarnessAgentRunner {
       const maxTurns = request.lifecycle?.maxTurns ?? workflow.agent.max_turns
       for (let turn = completedTurns + 1; turn <= maxTurns; turn += 1) {
         if (signal.aborted) throw signal.reason
+        // Re-read immediately before every prompt.  The post-turn read below
+        // is not sufficient: the card can leave an active state during the
+        // delay between turns or while a resumed Agent is becoming idle.
+        const current = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
+        const currentResult = classifyRefreshedIssue(current, workflow, runtime)
+        if (currentResult !== undefined) return currentResult
         const prompt = turn === 1 && !resumed
           ? lifecyclePrompt(request.lifecycle, await renderIssuePrompt(workflow.prompt, { issue, attempt }))
           : continuationPrompt(turn, maxTurns)
@@ -177,16 +191,9 @@ export class HarnessAgentRunner {
         }
 
         const refreshed = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
-        if (refreshed === undefined) return withHandoff({ kind: 'inactive', runtime })
-        const terminalStates = new Set(workflow.tracker.terminal_states.map(normalizedState))
-        if (terminalStates.has(normalizedState(refreshed.state.name))) {
-          return withHandoff({ kind: 'terminal', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
-        }
-        const activeStates = new Set(workflow.tracker.active_states.map(normalizedState))
-        if (!activeStates.has(normalizedState(refreshed.state.name))) {
-          return withHandoff({ kind: 'inactive', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
-        }
-        runtime = { ...runtime, state: refreshed.state.name, updatedAt: new Date().toISOString() }
+        const refreshedResult = classifyRefreshedIssue(refreshed, workflow, runtime)
+        if (refreshedResult !== undefined) return withHandoff(refreshedResult)
+        runtime = { ...runtime, state: refreshed!.state.name, updatedAt: new Date().toISOString() }
         onRuntime(runtime)
         if (turn < maxTurns) await abortableDelay(1000, signal)
       }
@@ -279,6 +286,23 @@ export class HarnessAgentRunner {
       },
     }))
   }
+}
+
+function classifyRefreshedIssue(
+  issue: TaskIssue | undefined,
+  workflow: WorkflowDefinition,
+  runtime: IssueRuntimeView,
+): AgentRunResult | undefined {
+  if (issue === undefined) return { kind: 'inactive', runtime }
+  const state = normalizedState(issue.state.name)
+  const projected = { ...runtime, state: issue.state.name, updatedAt: new Date().toISOString() }
+  if (workflow.tracker.terminal_states.map(normalizedState).includes(state)) {
+    return { kind: 'terminal', issue, runtime: projected }
+  }
+  if (!workflow.tracker.active_states.map(normalizedState).includes(state)) {
+    return { kind: 'inactive', issue, runtime: projected }
+  }
+  return undefined
 }
 
 export class AgentBlockedError extends Error {
