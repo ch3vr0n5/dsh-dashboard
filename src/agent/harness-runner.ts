@@ -293,10 +293,7 @@ export class HarnessAgentRunner {
             throw new Error(`lifecycle role ${role ?? 'legacy'} is not authorized to record User Test evidence`)
           }
           if (source.recordUserTestEvidence === undefined) throw new Error('task source does not support User Test evidence')
-          const { stdout } = await execFileAsync('git', ['-C', request.workspacePath, 'rev-parse', 'HEAD'], {
-            encoding: 'utf8', signal: exec.signal,
-          })
-          const workspaceSha = stdout.trim()
+          const workspaceSha = await cleanWorkspaceHead(request.workspacePath, exec.signal)
           if (workspaceSha !== evidence.commitSha) {
             throw new Error(`evidence commit ${evidence.commitSha} does not match host-derived workspace HEAD ${workspaceSha}`)
           }
@@ -314,6 +311,21 @@ export class HarnessAgentRunner {
       },
     }))
   }
+}
+
+/** Resolve evidence identity only when every index/worktree/submodule byte is committed. */
+export async function cleanWorkspaceHead(workspacePath: string, signal?: AbortSignal): Promise<string> {
+  const options = { encoding: 'utf8' as const, ...(signal === undefined ? {} : { signal }) }
+  const { stdout: status } = await execFileAsync('git', [
+    '-C', workspacePath, 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none',
+  ], options)
+  if (status.trim() !== '') {
+    throw new Error('User Test evidence requires a clean index, worktree, untracked-file set, and submodule state')
+  }
+  const { stdout } = await execFileAsync('git', ['-C', workspacePath, 'rev-parse', 'HEAD'], options)
+  const head = stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(head)) throw new Error(`workspace HEAD is not a full Git SHA: ${head}`)
+  return head
 }
 
 function classifyRefreshedIssue(
