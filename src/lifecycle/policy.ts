@@ -5,6 +5,7 @@ export const DEFAULT_LIFECYCLE_ROUTES: Readonly<Record<LifecycleRole, LifecycleR
   implementation: { permission_preset: 'workspace-write' },
   qa: { permission_preset: 'workspace-write', max_turns: 3 },
   review: { permission_preset: 'read-only', max_turns: 2 },
+  delivery: { permission_preset: 'workspace-write', max_turns: 3 },
   escalation: { permission_preset: 'read-only', max_turns: 2 },
 }
 
@@ -40,9 +41,15 @@ export function resolveLifecyclePipeline(
   failureCount: number,
 ): readonly LifecycleRole[] {
   if (!policy.enabled) return ['implementation']
+  // Preserve the pre-delivery fallback for existing version-1 workflows.
+  // Delivery is an externally mutating role and must always be opted into by
+  // an explicit state_roles entry.
   const requested = policy.state_roles[normalize(state)] ?? ['planning', 'implementation', 'qa']
   const highRisk = new Set(policy.high_risk_labels.map(normalize))
-  const routed = requested.map(role => role === 'review' && labels.some(label => highRisk.has(normalize(label))) ? 'escalation' : role)
+  const highRiskIssue = labels.some(label => highRisk.has(normalize(label)))
+  // High-risk analysis supplements automated review; it never replaces the
+  // review role that owns review evidence.
+  const routed = requested.flatMap(role => role === 'review' && highRiskIssue ? ['escalation', 'review'] as const : [role])
   if (failureCount >= policy.escalate_after_failures && !routed.includes('escalation')) {
     const writer = routed.findIndex(role => role === 'implementation' || role === 'qa')
     const insertAt = writer < 0 ? 0 : writer
@@ -63,9 +70,10 @@ export function rolePrompt(role: LifecycleRole): string {
   ].join('\n\n')
   const instruction: Record<LifecycleRole, string> = {
     planning: 'Plan/architecture only. Inspect read-only evidence and finish with a compact handoff: scope, acceptance criteria, files likely affected, risks, and test plan. Do not edit files, mutate services, push, or change task state.',
-    implementation: 'Implement the approved task. Make the smallest coherent change, run focused tests, commit and push the feature branch, and open or update its PR when requested by the project workflow. Do not merge and do not move the card to User Test; the QA role owns the test gate.',
-    qa: 'Perform focused validation and repair only mechanical defects you can prove. Preserve scope, run tests, commit/push any repair to the same branch/PR, and report exact evidence. Do not merge. If the workflow requires a User Test transition after successful QA, perform it only when all acceptance criteria are verified.',
-    review: 'Routine review only. Inspect the compact handoff and current diff. Do not edit files, mutate services, merge, or change the tracker. Return concise findings with severity and file/line evidence.',
+    implementation: 'Implement the approved task. Make the smallest coherent change, run focused tests, and commit locally. Do not push, open or update a PR, deploy, merge, or move the card to User Test; automated QA and review must inspect this exact commit first.',
+    qa: 'Run the required automated tests against the exact current commit and append structured automated-test evidence through the task tool. Repair only mechanical defects you can prove, but any repair creates a new commit that must be tested. Do not push, open or update a PR, deploy, merge, or move the card to User Test.',
+    review: 'Perform automated review of the exact tested commit and append structured review evidence with the unresolved blocking-finding count through the task tool. Inspect the compact handoff and current diff. Do not edit files, mutate services, push, open or update a PR, deploy, merge, or change task state. Return concise findings with severity and file/line evidence.',
+    delivery: 'Delivery only after structured automated-test and automated-review evidence passes for the exact current commit with zero unresolved blocking findings. Push and open or update the PR, read its exact head SHA, package and deploy that SHA, live-verify the running SHA and health URL, append each structured evidence component through the task tool, then request User Test. Never merge. If any commit changes, begin a new evidence attempt and repeat QA and review before PR/User Test.',
     escalation: 'High-risk/repeated-failure analysis only. Inspect read-only evidence, diagnose the smallest safe path forward, and produce a compact handoff for implementation. Do not edit files, mutate services, merge, or change the tracker.',
   }
   return `${common}\n\n${instruction[role]}`

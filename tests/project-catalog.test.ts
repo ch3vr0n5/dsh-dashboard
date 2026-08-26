@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
@@ -11,6 +11,7 @@ import { dashboardCatalogDomainSpec } from '../src/catalog/spec.ts'
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   for (const path of temporaryDirectories.splice(0)) {
     await rm(path, { recursive: true, force: true })
   }
@@ -49,6 +50,40 @@ describe('ProjectCatalog', () => {
 
     await catalog.stop()
     expect(storage.close).toHaveBeenCalledOnce()
+  })
+
+  it('keeps unchanged current-workspace registration stable across restarts', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-26T08:00:00.000Z'))
+    const root = await temporaryDirectory()
+    const currentProject = join(root, 'current-project')
+    await mkdir(currentProject)
+    await writeFile(join(currentProject, 'WORKFLOW.md'), '# Project policy\n')
+    execFileSync('git', ['init', currentProject], { stdio: 'ignore', windowsHide: true })
+    const storage = memoryDomain()
+    const bootstrap = {
+      currentProject: { root: currentProject, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    } as const
+
+    const first = new ProjectCatalog(storage.context, bootstrap, root)
+    await first.start()
+    const original = first.snapshot().projects[0]!
+    const originalRepository = original.repositories[0]!
+    await first.stop()
+
+    vi.setSystemTime(new Date('2026-08-26T09:00:00.000Z'))
+    const restarted = new ProjectCatalog(storage.context, bootstrap, root)
+    await restarted.start()
+    const stable = restarted.snapshot().projects[0]!
+
+    expect(stable.id).toBe(original.id)
+    expect(stable.createdAt).toBe(original.createdAt)
+    expect(stable.updatedAt).toBe(original.updatedAt)
+    expect(stable.repositories[0]?.id).toBe(originalRepository.id)
+    expect(stable.repositories[0]?.createdAt).toBe(originalRepository.createdAt)
+    expect(stable.repositories[0]?.updatedAt).toBe(originalRepository.updatedAt)
+    await restarted.stop()
   })
 
   it('discovers only bounded candidates and requires a fresh one-use confirmation token', async () => {
@@ -226,6 +261,65 @@ describe('ProjectCatalog', () => {
     await restarted.stop()
   })
 
+  it('preserves every lifecycle role attempt and resolves the newest attempt after restart', async () => {
+    const root = await temporaryDirectory()
+    const currentProject = join(root, 'current-project')
+    await mkdir(currentProject)
+    await writeFile(join(currentProject, 'WORKFLOW.md'), '# Current policy\n')
+    const storage = memoryDomain()
+    const bootstrap = {
+      currentProject: { root: currentProject, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    } as const
+    const first = new ProjectCatalog(storage.context, bootstrap, root)
+    await first.start()
+    const projectId = first.activeProject()!.id
+    const common = {
+      projectId,
+      issueKey: 'local:demo:issue-1',
+      role: 'implementation' as const,
+      issueRevision: 'revision-1',
+      provider: 'test',
+      model: 'test-model',
+      permissionPreset: 'workspace-write',
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 },
+    }
+    await first.saveLifecycleSession({
+      ...common,
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      status: 'failed',
+      startedAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T00:05:00.000Z',
+      finishedAt: '2026-08-25T00:05:00.000Z',
+      runtimeMs: 300_000,
+      error: 'interrupted',
+    })
+    await first.saveLifecycleSession({
+      ...common,
+      attemptId: 'attempt-2',
+      sessionId: 'session-2',
+      status: 'running',
+      startedAt: '2026-08-25T01:00:00.000Z',
+      updatedAt: '2026-08-25T01:01:00.000Z',
+    })
+    await first.stop()
+
+    const restarted = new ProjectCatalog(storage.context, bootstrap, root)
+    await restarted.start()
+    expect(restarted.lifecycleSessionsFor(projectId, common.issueKey).map(record => record.attemptId)).toEqual([
+      'attempt-1',
+      'attempt-2',
+    ])
+    expect(restarted.lifecycleSession(projectId, common.issueKey, 'implementation')).toMatchObject({
+      attemptId: 'attempt-2',
+      sessionId: 'session-2',
+      status: 'running',
+      startedAt: '2026-08-25T01:00:00.000Z',
+    })
+    await restarted.stop()
+  })
+
   it('caps scan candidates and rejects an aborted scan before doing more work', async () => {
     const root = await temporaryDirectory()
     const currentProject = join(root, 'current-project')
@@ -256,7 +350,7 @@ describe('ProjectCatalog', () => {
 })
 
 async function temporaryDirectory(): Promise<string> {
-  const path = await mkdtemp(join(tmpdir(), 'dsh-dashboard-catalog-'))
+  const path = await realpath(await mkdtemp(join(tmpdir(), 'dsh-dashboard-catalog-')))
   temporaryDirectories.push(path)
   return path
 }

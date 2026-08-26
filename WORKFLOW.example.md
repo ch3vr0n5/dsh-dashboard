@@ -47,13 +47,17 @@ policy:
     # Opt in per project. Routes inherit Harness's default unless provider/model are supplied.
     enabled: true
     state_roles:
-      Todo: [planning, implementation, qa]
+      # Personal and Work use this same ordered transition contract.
+      Todo: [planning, implementation, qa, review, delivery]
+      In Progress: [planning, implementation, qa, review, delivery]
+      Human Review: [qa, review, delivery]
       Review: [review]
     roles:
       planning: { permission_preset: read-only, max_turns: 2 }
       implementation: { permission_preset: workspace-write }
       qa: { permission_preset: workspace-write, max_turns: 3 }
       review: { permission_preset: read-only, max_turns: 2 }
+      delivery: { permission_preset: workspace-write, max_turns: 3 }
       escalation: { permission_preset: read-only, max_turns: 2 }
     escalate_after_failures: 2
     high_risk_labels: [security, high-risk, architecture]
@@ -91,3 +95,12 @@ No description was provided.
 Work only in the provided workspace. Keep the tracker workpad and state current
 through the available tracker integration. Continue autonomously until the issue
 leaves an active state or a true external blocker prevents progress.
+
+User Test is an enforced transition, not a prose convention. For every Harness
+or plugin card, implementation commits locally; QA records automated-test result,
+timestamp, and exact commit; review records its result, timestamp, exact commit,
+and unresolved blocking-finding count. Only delivery may then create/update the
+PR, deploy its exact head, verify that exact SHA and live health URL, append the
+structured evidence through the supported task tool, and request User Test.
+Personal and Work follow this identical contract. Any revision starts a new
+attempt; prior evidence remains history and cannot authorize the new commit.

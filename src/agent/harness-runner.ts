@@ -1,6 +1,8 @@
 /** Same-thread multi-turn runner backed by the Harness Agent registry. */
 
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-workspace'
 import { installModelSelection, type AgentHandle, type ModelSelection, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -21,6 +23,9 @@ import { emptyTokens } from '../runtime/types.ts'
 import { promptFingerprint, renderIssuePrompt } from '../workflow/prompt.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { LifecycleRole } from '../lifecycle/types.ts'
+import { parseUserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
+
+const execFileAsync = promisify(execFile)
 
 export interface HarnessRunnerConfig {
   readonly permissionPreset: string
@@ -99,6 +104,14 @@ export class HarnessAgentRunner {
     }
     onRuntime(runtime)
 
+    // A dispatch snapshot can become stale while a workspace is prepared or a
+    // replacement plugin process is starting.  Validate the source before we
+    // create/resume a conversation so an inactive card cannot receive a new
+    // worker session.
+    const initial = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
+    const initialResult = classifyRefreshedIssue(initial, workflow, runtime)
+    if (initialResult !== undefined) return initialResult
+
     let handle: AgentHandle | undefined
     let removeEventListener: (() => void) | undefined
     const onAbort = (): void => {
@@ -112,7 +125,7 @@ export class HarnessAgentRunner {
       const setup = async (agentCtx: Context): Promise<void> => {
         if (presets !== undefined) await presets.mount(agentCtx, resolvedPreset?.id)
         installModelSelection(agentCtx, selected)
-        this.installTaskSourceTool(agentCtx, source)
+        this.installTaskSourceTool(agentCtx, source, request)
       }
       handle = resumed
         ? await this.ctx.agents.resume({
@@ -147,6 +160,12 @@ export class HarnessAgentRunner {
       const maxTurns = request.lifecycle?.maxTurns ?? workflow.agent.max_turns
       for (let turn = completedTurns + 1; turn <= maxTurns; turn += 1) {
         if (signal.aborted) throw signal.reason
+        // Re-read immediately before every prompt.  The post-turn read below
+        // is not sufficient: the card can leave an active state during the
+        // delay between turns or while a resumed Agent is becoming idle.
+        const current = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
+        const currentResult = classifyRefreshedIssue(current, workflow, runtime)
+        if (currentResult !== undefined) return currentResult
         const prompt = turn === 1 && !resumed
           ? lifecyclePrompt(request.lifecycle, await renderIssuePrompt(workflow.prompt, { issue, attempt }))
           : continuationPrompt(turn, maxTurns)
@@ -177,16 +196,9 @@ export class HarnessAgentRunner {
         }
 
         const refreshed = (await source.getIssuesByNativeRefs([issue.nativeRef], signal))[0]
-        if (refreshed === undefined) return withHandoff({ kind: 'inactive', runtime })
-        const terminalStates = new Set(workflow.tracker.terminal_states.map(normalizedState))
-        if (terminalStates.has(normalizedState(refreshed.state.name))) {
-          return withHandoff({ kind: 'terminal', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
-        }
-        const activeStates = new Set(workflow.tracker.active_states.map(normalizedState))
-        if (!activeStates.has(normalizedState(refreshed.state.name))) {
-          return withHandoff({ kind: 'inactive', issue: refreshed, runtime: { ...runtime, state: refreshed.state.name } })
-        }
-        runtime = { ...runtime, state: refreshed.state.name, updatedAt: new Date().toISOString() }
+        const refreshedResult = classifyRefreshedIssue(refreshed, workflow, runtime)
+        if (refreshedResult !== undefined) return withHandoff(refreshedResult)
+        runtime = { ...runtime, state: refreshed!.state.name, updatedAt: new Date().toISOString() }
         onRuntime(runtime)
         if (turn < maxTurns) await abortableDelay(1000, signal)
       }
@@ -204,7 +216,7 @@ export class HarnessAgentRunner {
     }
   }
 
-  private installTaskSourceTool(agentCtx: Context, source: TaskSource): void {
+  private installTaskSourceTool(agentCtx: Context, source: TaskSource, request: AgentRunRequest): void {
     const tool = resolveTaskSourceAgentTool(source)
     if (tool === undefined) return
     const tools = agentCtx.get('tools')
@@ -256,18 +268,37 @@ export class HarnessAgentRunner {
       name: tool.name,
       description: tool.description,
       parameters: {
-        operation: { type: 'string', enum: ['get', 'update'], required: true },
+        operation: { type: 'string', enum: ['get', 'update', 'record-user-test-evidence'], required: true },
         nativeRef: { type: 'string', required: true },
         title: { type: 'string' },
         description: { oneOf: [{ type: 'string' }, { type: 'null' }] },
         state: { type: 'string' },
         priority: { oneOf: [{ type: 'integer' }, { type: 'null' }] },
+        evidence: { type: 'json', description: 'Structured exact-commit evidence patch; required for record-user-test-evidence.' },
       },
       output: {
         schema: { type: 'json' },
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
+        if (args.nativeRef !== request.issue.nativeRef) {
+          throw new Error(`task tool is scoped to ${request.issue.nativeRef}; cross-task access is forbidden`)
+        }
+        const evidence = args.evidence === undefined ? undefined : parseUserTestEvidencePatch(args.evidence)
+        if (typeof evidence === 'string') throw new Error(`invalid User Test evidence: ${evidence}`)
+        if (args.operation === 'record-user-test-evidence') {
+          if (evidence === undefined) throw new Error('record-user-test-evidence requires evidence')
+          const role = request.lifecycle?.role
+          if (role !== 'qa' && role !== 'review' && role !== 'delivery') {
+            throw new Error(`lifecycle role ${role ?? 'legacy'} is not authorized to record User Test evidence`)
+          }
+          if (source.recordUserTestEvidence === undefined) throw new Error('task source does not support User Test evidence')
+          const workspaceSha = await cleanWorkspaceHead(request.workspacePath, exec.signal)
+          if (workspaceSha !== evidence.commitSha) {
+            throw new Error(`evidence commit ${evidence.commitSha} does not match host-derived workspace HEAD ${workspaceSha}`)
+          }
+          return await source.recordUserTestEvidence(args.nativeRef, evidence, { role, workspaceSha }, exec.signal) as never
+        }
         return await tool.execute({
           operation: args.operation,
           nativeRef: args.nativeRef,
@@ -275,10 +306,43 @@ export class HarnessAgentRunner {
           ...(args.description === undefined ? {} : { description: args.description }),
           ...(args.state === undefined ? {} : { state: args.state }),
           ...(args.priority === undefined ? {} : { priority: args.priority }),
+          ...(evidence === undefined ? {} : { evidence }),
         }, exec.signal) as never
       },
     }))
   }
+}
+
+/** Resolve evidence identity only when every index/worktree/submodule byte is committed. */
+export async function cleanWorkspaceHead(workspacePath: string, signal?: AbortSignal): Promise<string> {
+  const options = { encoding: 'utf8' as const, ...(signal === undefined ? {} : { signal }) }
+  const { stdout: status } = await execFileAsync('git', [
+    '-C', workspacePath, 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none',
+  ], options)
+  if (status.trim() !== '') {
+    throw new Error('User Test evidence requires a clean index, worktree, untracked-file set, and submodule state')
+  }
+  const { stdout } = await execFileAsync('git', ['-C', workspacePath, 'rev-parse', 'HEAD'], options)
+  const head = stdout.trim()
+  if (!/^[0-9a-f]{40}$/u.test(head)) throw new Error(`workspace HEAD is not a full Git SHA: ${head}`)
+  return head
+}
+
+function classifyRefreshedIssue(
+  issue: TaskIssue | undefined,
+  workflow: WorkflowDefinition,
+  runtime: IssueRuntimeView,
+): AgentRunResult | undefined {
+  if (issue === undefined) return { kind: 'inactive', runtime }
+  const state = normalizedState(issue.state.name)
+  const projected = { ...runtime, state: issue.state.name, updatedAt: new Date().toISOString() }
+  if (workflow.tracker.terminal_states.map(normalizedState).includes(state)) {
+    return { kind: 'terminal', issue, runtime: projected }
+  }
+  if (!workflow.tracker.active_states.map(normalizedState).includes(state)) {
+    return { kind: 'inactive', issue, runtime: projected }
+  }
+  return undefined
 }
 
 export class AgentBlockedError extends Error {

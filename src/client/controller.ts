@@ -139,6 +139,7 @@ export class DashboardDataController implements DashboardDataPort {
     await this.call('updateTask', { nativeRef, changes }, false, true)
   }
 
+
   async deleteTask(nativeRef: string): Promise<void> {
     await this.call('deleteTask', { nativeRef }, false, true)
   }

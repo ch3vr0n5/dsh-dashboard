@@ -6,6 +6,7 @@ import type { AgentProfileConfig, PolicyDefaultsConfig } from '../config.ts'
 import type { WorkflowDefinition } from './types.ts'
 import { DEFAULT_LIFECYCLE_ROUTES } from '../lifecycle/policy.ts'
 import type { LifecyclePolicy, LifecycleRole } from '../lifecycle/types.ts'
+import { normalizedState } from '../domain/issue.ts'
 
 const nonBlank = z.string().trim().min(1)
 
@@ -56,12 +57,13 @@ const schema = z.object({
     }).strict().optional(),
     lifecycle: z.object({
       enabled: z.boolean().optional(),
-      state_roles: z.record(z.string(), z.array(z.enum(['planning', 'implementation', 'qa', 'review', 'escalation']))).optional(),
+      state_roles: z.record(z.string(), z.array(z.enum(['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation']))).optional(),
       roles: z.object({
         planning: lifecycleRouteSchema.optional(),
         implementation: lifecycleRouteSchema.optional(),
         qa: lifecycleRouteSchema.optional(),
         review: lifecycleRouteSchema.optional(),
+        delivery: lifecycleRouteSchema.optional(),
         escalation: lifecycleRouteSchema.optional(),
       }).strict().optional(),
       escalate_after_failures: z.number().int().positive().optional(),
@@ -163,7 +165,7 @@ function resolveLifecycle(
 ): LifecyclePolicy {
   const configured = policy ?? {}
   const roles = {} as Record<LifecycleRole, LifecyclePolicy['roles'][LifecycleRole]>
-  for (const role of ['planning', 'implementation', 'qa', 'review', 'escalation'] as const) {
+  for (const role of ['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation'] as const) {
     const merged = { ...DEFAULT_LIFECYCLE_ROUTES[role], ...defaults.roles[role], ...(configured.roles?.[role] ?? {}) }
     roles[role] = {
       ...(merged.provider === undefined ? {} : { provider: merged.provider }),
@@ -179,11 +181,30 @@ function resolveLifecycle(
   }
   return {
     enabled: configured.enabled ?? defaults.enabled,
-    state_roles: configured.state_roles ?? defaults.state_roles,
+    state_roles: normalizeLifecycleStateRoles(configured.state_roles ?? defaults.state_roles),
     roles,
     escalate_after_failures: configured.escalate_after_failures ?? defaults.escalate_after_failures,
     high_risk_labels: configured.high_risk_labels ?? defaults.high_risk_labels,
   }
+}
+
+function normalizeLifecycleStateRoles(
+  stateRoles: LifecyclePolicy['state_roles'],
+): LifecyclePolicy['state_roles'] {
+  const normalized: Record<string, readonly LifecycleRole[]> = {}
+  const originalKeys = new Map<string, string>()
+  for (const [state, roles] of Object.entries(stateRoles)) {
+    const key = normalizedState(state)
+    const previous = originalKeys.get(key)
+    if (previous !== undefined) {
+      throw new Error(
+        `WORKFLOW.md configuration is invalid: policy.lifecycle.state_roles keys ${JSON.stringify(previous)} and ${JSON.stringify(state)} collide after normalization`,
+      )
+    }
+    originalKeys.set(key, state)
+    normalized[key] = roles
+  }
+  return normalized
 }
 
 function normalizeProvider(kindValue: string, value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {

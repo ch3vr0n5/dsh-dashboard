@@ -1,6 +1,6 @@
 /** Dynamically reloaded, last-good WORKFLOW.md store. */
 
-import { watch, type FSWatcher } from 'node:fs'
+import { unwatchFile, watch, watchFile, type FSWatcher } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -14,6 +14,7 @@ export class WorkflowStore {
   private lastAttemptAt: string | undefined
   private watcher: FSWatcher | undefined
   private debounce: NodeJS.Timeout | undefined
+  private polling = false
   private readonly listeners = new Set<() => void>()
   readonly path: string
 
@@ -29,14 +30,24 @@ export class WorkflowStore {
   /** Load once, then watch the containing directory so atomic replacement is observed. */
   async start(): Promise<void> {
     await this.reload()
-    this.watcher = watch(dirname(this.path), { persistent: false }, (_event, filename) => {
-      if (filename !== null && resolve(dirname(this.path), filename.toString()) !== this.path) return
-      if (this.debounce !== undefined) clearTimeout(this.debounce)
-      this.debounce = setTimeout(() => { void this.reload() }, 75)
+    this.watcher = watch(dirname(this.path), { persistent: false }, () => {
+      // Directory watcher filenames are optional and platform-dependent (and
+      // may use a non-canonical /var alias on macOS). Reloading on the bounded
+      // policy directory's events keeps atomic replacement and alias paths
+      // reliable; debounce coalesces unrelated bursts.
+      this.scheduleReload()
     })
     this.watcher.on('error', (error) => {
       this.ctx.logger.warn('dsh-dashboard: WORKFLOW.md watcher failed: %s', error.message)
     })
+    // fs.watch can omit in-place writes on some filesystems. A lightweight
+    // stat watcher closes that gap while the directory watcher continues to
+    // cover atomic replacement.
+    watchFile(this.path, { interval: 250, persistent: false }, (current, previous) => {
+      if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return
+      this.scheduleReload()
+    })
+    this.polling = true
   }
 
   /** Stop directory observation. */
@@ -45,6 +56,8 @@ export class WorkflowStore {
     this.debounce = undefined
     this.watcher?.close()
     this.watcher = undefined
+    if (this.polling) unwatchFile(this.path)
+    this.polling = false
   }
 
   /** Read and validate; retain current on any failure. */
@@ -84,6 +97,11 @@ export class WorkflowStore {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
+  }
+
+  private scheduleReload(): void {
+    if (this.debounce !== undefined) clearTimeout(this.debounce)
+    this.debounce = setTimeout(() => { void this.reload() }, 75)
   }
 
   private emit(): void {

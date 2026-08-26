@@ -178,13 +178,15 @@ export class ProjectCatalog {
   }
 
   lifecycleSession(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): LifecycleSessionRecord | undefined {
-    const record = this.requireLifecycleSessions().get(lifecycleSessionKey(projectId, issueKey, role))
+    const record = this.lifecycleSessionsFor(projectId, issueKey)
+      .filter(candidate => candidate.role === role)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     return record === undefined ? undefined : { ...record, tokens: { ...record.tokens } }
   }
 
   async saveLifecycleSession(record: LifecycleSessionRecord): Promise<void> {
     await this.enqueueMutation(async () => {
-      await this.requireLifecycleSessions().put(lifecycleSessionKey(record.projectId, record.issueKey, record.role), record)
+      await this.requireLifecycleSessions().put(lifecycleSessionKey(record.projectId, record.issueKey, record.role, record.attemptId), record)
     })
   }
 
@@ -375,13 +377,27 @@ export class ProjectCatalog {
     const timestamp = now()
     const repository = await this.upsertRepository(inspection.repository, timestamp)
     const previousRepositoryIds = existing?.repositoryIds ?? []
+    const repositoryIds = repository === undefined ? [] : [repository.id]
+    const name = requestedName ?? existing?.name ?? basename(root)
+    const workspaceStrategy = repository === undefined ? 'controlled-directory' : 'worktree'
+    if (
+      existing !== undefined
+      && existing.name === name
+      && existing.root === root
+      && existing.policyPath === inspection.policyPath
+      && sameStrings(existing.repositoryIds, repositoryIds)
+      && existing.workspaceStrategy === workspaceStrategy
+      && existing.source === source
+    ) {
+      return existing
+    }
     const project: ProjectRecord = {
       id: existing?.id ?? randomUUID(),
-      name: requestedName ?? existing?.name ?? basename(root),
+      name,
       root,
       ...(inspection.policyPath === undefined ? {} : { policyPath: inspection.policyPath }),
-      repositoryIds: repository === undefined ? [] : [repository.id],
-      workspaceStrategy: repository === undefined ? 'controlled-directory' : 'worktree',
+      repositoryIds,
+      workspaceStrategy,
       autonomousClaims: false,
       source,
       createdAt: existing?.createdAt ?? timestamp,
@@ -409,6 +425,15 @@ export class ProjectCatalog {
   ): Promise<RepositoryRecord | undefined> {
     if (inspection === undefined) return undefined
     const existing = findByPath(this.requireRepositories(), inspection.root)
+    if (
+      existing !== undefined
+      && existing.kind === inspection.kind
+      && existing.root === inspection.root
+      && existing.remoteUrl === inspection.remoteUrl
+      && existing.branch === inspection.branch
+    ) {
+      return existing
+    }
     const repository: RepositoryRecord = {
       id: existing?.id ?? randomUUID(),
       ...inspection,
@@ -490,12 +515,16 @@ export class ProjectCatalog {
   }
 }
 
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 function workerSessionKey(projectId: ProjectId, issueKey: string): string {
   return `${projectId}:${issueKey}`
 }
 
-function lifecycleSessionKey(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role']): string {
-  return `${projectId}:${issueKey}:${role}`
+function lifecycleSessionKey(projectId: ProjectId, issueKey: string, role: LifecycleSessionRecord['role'], attemptId?: string): string {
+  return `${projectId}:${issueKey}:${role}${attemptId === undefined ? '' : `:${attemptId}`}`
 }
 
 interface ProjectInspection {
