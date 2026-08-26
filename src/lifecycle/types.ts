@@ -1,6 +1,6 @@
 /** Explicit, durable model/permission routing for Dashboard task phases. */
 
-export const lifecycleRoles = ['planning', 'implementation', 'qa', 'review', 'escalation'] as const
+export const lifecycleRoles = ['planning', 'implementation', 'qa', 'review', 'delivery', 'escalation'] as const
 export type LifecycleRole = (typeof lifecycleRoles)[number]
 
 export interface LifecycleRoute {

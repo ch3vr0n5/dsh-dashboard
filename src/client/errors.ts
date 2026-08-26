@@ -28,6 +28,8 @@ const ERROR_TRANSLATION_KEYS = {
   'local.taskNotFound': 'error.localTaskNotFound',
   'local.titleEmpty': 'error.localTitleEmpty',
   'local.titleTooLong': 'error.localTitleTooLong',
+  'local.userTestEvidenceInvalid': 'error.localUserTestEvidenceInvalid',
+  'local.userTestEvidenceMissing': 'error.localUserTestEvidenceMissing',
   'local.workflowStatesMissing': 'error.localWorkflowStatesMissing',
   'global.readOnly': 'error.globalReadOnly',
   'project.workflowInvalid': 'error.projectWorkflowInvalid',

@@ -22,6 +22,7 @@ import type {
 import { addTokens, emptyTokens } from '../runtime/types.ts'
 import { buildTaskTimelinePage, RuntimeTimelineArchive } from '../runtime/timeline.ts'
 import type { CreateTaskInput, TaskSourceResolver, UpdateTaskInput } from '../task-source/index.ts'
+import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 import type { WorkflowStore } from '../workflow/store.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { WorkspaceManager } from '../workspace/manager.ts'
@@ -266,6 +267,14 @@ export class DashboardOrchestrator {
     const source = this.sources.require(definition.tracker.kind)
     if (source.updateTask === undefined) throw new Error(`Task source ${source.kind} does not support Dashboard task updates`)
     await source.updateTask(nativeRef, input, signal)
+    await this.refreshAfterMutation()
+  }
+
+  async recordUserTestEvidence(nativeRef: string, input: UserTestEvidencePatch, signal?: AbortSignal): Promise<void> {
+    const definition = this.workflow.require()
+    const source = this.sources.require(definition.tracker.kind)
+    if (source.recordUserTestEvidence === undefined) throw new Error(`Task source ${source.kind} does not support structured User Test evidence`)
+    await source.recordUserTestEvidence(nativeRef, input, signal)
     await this.refreshAfterMutation()
   }
 

@@ -9,6 +9,7 @@ import type {
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
 import type { LifecycleSessionView } from '../lifecycle/types.ts'
+import type { UserTestEvidencePatch } from '../lifecycle/user-test-evidence.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -176,6 +177,7 @@ export interface DashboardRpcMap {
   readonly stop: { input: { key: string }; output: DashboardSnapshot }
   readonly createTask: { input: CreateTaskInput; output: DashboardSnapshot }
   readonly updateTask: { input: { nativeRef: string; changes: UpdateTaskInput }; output: DashboardSnapshot }
+  readonly recordUserTestEvidence: { input: { nativeRef: string; evidence: UserTestEvidencePatch }; output: DashboardSnapshot }
   readonly deleteTask: { input: { nativeRef: string }; output: DashboardSnapshot }
   readonly switchProject: { input: { projectId: string }; output: DashboardSnapshot }
   readonly switchGlobal: { input: Record<string, never>; output: DashboardSnapshot }
