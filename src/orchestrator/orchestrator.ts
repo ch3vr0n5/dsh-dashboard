@@ -27,7 +27,7 @@ import type { WorkflowDefinition } from '../workflow/types.ts'
 import type { WorkspaceManager } from '../workspace/manager.ts'
 import { resolveWorkspaceRoot } from '../workspace/path-safety.ts'
 import { compareCandidates, failureRetryDelay, stateLimit } from './scheduling.ts'
-import { compactHandoff, DEFAULT_LIFECYCLE_POLICY, resolveLifecyclePipeline, rolePrompt } from '../lifecycle/policy.ts'
+import { compactHandoff, DEFAULT_LIFECYCLE_POLICY, resolveLifecyclePipeline, resolveLifecycleRoute, rolePrompt } from '../lifecycle/policy.ts'
 import type { LifecycleRole } from '../lifecycle/types.ts'
 
 interface RunningRecord {
@@ -559,7 +559,7 @@ export class DashboardOrchestrator {
       const result = await this.runner.run({
         issue, source, workflow, workspacePath, attempt,
         ...(binding?.sessionId === undefined ? {} : { sessionId: SessionId(binding.sessionId) }),
-        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, 0),
+        onSessionBound: async sessionId => await this.saveBinding(issue, sessionId, 'running', undefined, attempt),
         signal: abort.signal,
         onRuntime: view => this.updateRuntime(record, view),
       })
@@ -568,7 +568,7 @@ export class DashboardOrchestrator {
       return result
     }
 
-    const failureCount = binding?.failureCount ?? 0
+    const failureCount = Math.max(binding?.failureCount ?? 0, attempt)
     const roles = resolveLifecyclePipeline(lifecycle, issue.state.name, issue.labels, failureCount)
     let aggregate = record.runtime
     let handoff: string | undefined
@@ -579,7 +579,7 @@ export class DashboardOrchestrator {
         handoff = existing.handoff ?? handoff
         continue
       }
-      const route = lifecycle.roles[role]
+      const route = resolveLifecycleRoute(lifecycle.roles[role], failureCount)
       const fallback = this.ctx.agentDefaultModel.currentSelection()
       const provider = route.provider ?? fallback.provider
       const model = route.model ?? fallback.model
@@ -625,7 +625,7 @@ export class DashboardOrchestrator {
           },
           onSessionBound: async sessionId => {
             await this.catalog.saveLifecycleSession({ ...current, sessionId, updatedAt: new Date().toISOString() })
-            await this.saveBinding(issue, sessionId, 'running', undefined, 0)
+            await this.saveBinding(issue, sessionId, 'running', undefined, attempt)
           },
           signal: abort.signal,
           onRuntime: view => {

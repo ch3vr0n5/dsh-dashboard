@@ -16,6 +16,23 @@ export const DEFAULT_LIFECYCLE_POLICY: LifecyclePolicy = {
   high_risk_labels: ['security', 'high-risk', 'architecture'],
 }
 
+/** Select a role's preferred route until failures justify its explicit fallback. */
+export function resolveLifecycleRoute(route: LifecycleRoute, failureCount: number): LifecycleRoute {
+  const hasFallback = route.fallback_provider !== undefined
+    || route.fallback_model !== undefined
+    || route.fallback_reasoning_effort !== undefined
+  if (!hasFallback || failureCount < (route.fallback_after_failures ?? 1)) return route
+  return {
+    ...(route.fallback_provider ?? route.provider) === undefined ? {} : { provider: route.fallback_provider ?? route.provider },
+    ...(route.fallback_model ?? route.model) === undefined ? {} : { model: route.fallback_model ?? route.model },
+    ...(route.fallback_reasoning_effort ?? route.reasoning_effort) === undefined
+      ? {}
+      : { reasoning_effort: route.fallback_reasoning_effort ?? route.reasoning_effort },
+    permission_preset: route.permission_preset,
+    ...(route.max_turns === undefined ? {} : { max_turns: route.max_turns }),
+  }
+}
+
 export function resolveLifecyclePipeline(
   policy: LifecyclePolicy,
   state: string,

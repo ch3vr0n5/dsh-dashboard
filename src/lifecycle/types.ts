@@ -10,6 +10,14 @@ export interface LifecycleRoute {
   readonly model?: string
   /** Provider-supported reasoning effort. */
   readonly reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh'
+  /** Optional provider used after the configured failure threshold. */
+  readonly fallback_provider?: string
+  /** Optional model used after the configured failure threshold. */
+  readonly fallback_model?: string
+  /** Optional reasoning effort used with the fallback route. */
+  readonly fallback_reasoning_effort?: 'low' | 'medium' | 'high' | 'xhigh'
+  /** Dashboard attempt count that activates the fallback route. Defaults to one. */
+  readonly fallback_after_failures?: number
   /** Permission preset pinned into the role-owned session. */
   readonly permission_preset: string
   /** Role-local maximum turns; implementation may use the task default. */

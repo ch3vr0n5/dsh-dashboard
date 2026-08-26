@@ -13,6 +13,10 @@ const lifecycleRouteSchema = z.object({
   provider: nonBlank.optional(),
   model: nonBlank.optional(),
   reasoning_effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  fallback_provider: nonBlank.optional(),
+  fallback_model: nonBlank.optional(),
+  fallback_reasoning_effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
+  fallback_after_failures: z.number().int().positive().optional(),
   permission_preset: nonBlank.optional(),
   max_turns: z.number().int().positive().optional(),
 }).strict()
@@ -165,6 +169,10 @@ function resolveLifecycle(
       ...(merged.provider === undefined ? {} : { provider: merged.provider }),
       ...(merged.model === undefined ? {} : { model: merged.model }),
       ...(merged.reasoning_effort === undefined ? {} : { reasoning_effort: merged.reasoning_effort }),
+      ...(merged.fallback_provider === undefined ? {} : { fallback_provider: merged.fallback_provider }),
+      ...(merged.fallback_model === undefined ? {} : { fallback_model: merged.fallback_model }),
+      ...(merged.fallback_reasoning_effort === undefined ? {} : { fallback_reasoning_effort: merged.fallback_reasoning_effort }),
+      ...(merged.fallback_after_failures === undefined ? {} : { fallback_after_failures: merged.fallback_after_failures }),
       permission_preset: merged.permission_preset ?? DEFAULT_LIFECYCLE_ROUTES[role].permission_preset,
       ...(merged.max_turns === undefined ? {} : { max_turns: merged.max_turns }),
     }
