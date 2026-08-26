@@ -27,6 +27,7 @@ const EVIDENCE_FIELDS = [
   'headSha', 'baseSha', 'pullRequestUrl', 'authorId', 'reviewerId', 'reviewId',
   'testDeploymentId', 'acceptanceId', 'reason',
 ] as const
+export type AutonomousEvidenceField = (typeof EVIDENCE_FIELDS)[number]
 
 export interface AutonomousEvidence {
   readonly headSha?: string
@@ -87,11 +88,12 @@ export type ControlPlaneReadResult =
   | { readonly status: 'failed', readonly warning: string }
 
 export interface AutonomousLifecycleView {
-  readonly source: 'control-plane' | 'legacy-alias' | 'corrupt-stream'
+  readonly source: 'control-plane' | 'legacy-alias' | 'legacy-unmapped' | 'corrupt-stream'
   readonly taskKey: string
   readonly taskSlug: string
   readonly domain: AutonomousDomain
-  readonly state: AutonomousState
+  readonly state: AutonomousState | 'UNMAPPED'
+  readonly providerState?: string
   readonly currentRole: string
   readonly nextTransition?: AutonomousState
   readonly nextTransitions: readonly AutonomousState[]
@@ -146,6 +148,29 @@ const transitions: Readonly<Record<AutonomousState, readonly AutonomousState[]>>
   RECOVERING: [], PAUSED_CAPACITY: [], WAITING_HUMAN: [], FAILED_POLICY: ['TRIAGE'],
 }
 
+/** Every recognized evidence field is admissible only for these target states. */
+export const AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE: Readonly<Record<AutonomousState, readonly AutonomousEvidenceField[]>> = {
+  IDEA: [],
+  TRIAGE: [],
+  PLANNING: [],
+  READY: [],
+  CLAIMED: [],
+  IMPLEMENTING: [],
+  LOCAL_QA: [],
+  PR_OPEN: ['headSha', 'baseSha', 'pullRequestUrl', 'authorId'],
+  INDEPENDENT_REVIEW: ['headSha', 'reviewerId', 'reviewId'],
+  REWORK: ['headSha', 'reviewerId', 'reviewId'],
+  TEST_DEPLOYED: ['headSha', 'reviewerId', 'reviewId', 'testDeploymentId'],
+  ACCEPTANCE_QA: ['headSha', 'acceptanceId'],
+  MERGE_READY: ['headSha'],
+  MERGED: ['headSha'],
+  DONE: [],
+  RECOVERING: ['reason'],
+  PAUSED_CAPACITY: ['reason'],
+  WAITING_HUMAN: ['reason'],
+  FAILED_POLICY: ['reason'],
+}
+
 const roleByState: Readonly<Record<AutonomousState, string>> = {
   IDEA: 'intake', TRIAGE: 'triage', PLANNING: 'planner', READY: 'admission', CLAIMED: 'claim-owner',
   IMPLEMENTING: 'implementation', LOCAL_QA: 'local-qa', PR_OPEN: 'delivery', INDEPENDENT_REVIEW: 'independent-reviewer',
@@ -158,8 +183,8 @@ const suspendableStates = new Set<AutonomousState>(AUTONOMOUS_STATES.filter(stat
   !['DONE', 'RECOVERING', 'PAUSED_CAPACITY', 'WAITING_HUMAN', 'FAILED_POLICY'].includes(state)
 )))
 
-export function autonomousStateForLegacyState(state: string): AutonomousState {
-  return aliases[state.trim().toLocaleLowerCase('en-US')] ?? 'TRIAGE'
+export function autonomousStateForLegacyState(state: string): AutonomousState | undefined {
+  return aliases[state.trim().toLocaleLowerCase('en-US')]
 }
 
 export const migrateLegacyLifecycleState = autonomousStateForLegacyState
@@ -210,8 +235,12 @@ export function projectAutonomousLifecycle(
   const identity = autonomousTaskIdentity(identifier, title)
   const expectedTaskId = `${identity.taskKey}-${identity.taskSlug}`
   const legacyStateValue = autonomousStateForLegacyState(legacyState)
-  if (readFailure !== undefined) return corruptView(identity, legacyStateValue, readFailure)
-  if (read === undefined) return lifecycleView(identity.taskKey, identity.taskSlug, 'work', legacyStateValue, 'legacy-alias', emptyEvidence())
+  if (readFailure !== undefined) return corruptView(identity, legacyStateValue, legacyState, readFailure)
+  if (read === undefined) {
+    return legacyStateValue === undefined
+      ? lifecycleView(identity.taskKey, identity.taskSlug, 'work', 'UNMAPPED', 'legacy-unmapped', emptyEvidence(), undefined, [], legacyState)
+      : lifecycleView(identity.taskKey, identity.taskSlug, 'work', legacyStateValue, 'legacy-alias', emptyEvidence())
+  }
   try {
     const aggregate = verifyAndProjectRead(read, expectedTaskId, 'work')
     return lifecycleView(
@@ -219,7 +248,7 @@ export function projectAutonomousLifecycle(
       'control-plane', aggregate.projection.evidence, interruptFor(aggregate.projection),
     )
   } catch (error) {
-    return corruptView(identity, legacyStateValue, integrityMessage(error))
+    return corruptView(identity, legacyStateValue, legacyState, integrityMessage(error))
   }
 }
 
@@ -285,6 +314,7 @@ function applyTransition(projection: MutableProjection, event: ControlPlaneTaskE
   const evidence = event.payload.evidence ?? {}
   const from = projection.state
   if (from === 'DONE') throw new IntegrityError('DONE tasks cannot transition')
+  validateEvidenceForState(to, evidence)
   if (evidence.authorId !== undefined && evidence.reviewerId !== undefined && evidence.authorId === evidence.reviewerId) {
     throw new IntegrityError('same-event author and reviewer identities must differ')
   }
@@ -453,6 +483,12 @@ function parseEvidence(value: unknown, name: string): AutonomousEvidence {
   return parsed
 }
 
+function validateEvidenceForState(to: AutonomousState, evidence: AutonomousEvidence): void {
+  const allowed = AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE[to]
+  const extraneous = Object.keys(evidence).find(field => !allowed.includes(field as AutonomousEvidenceField))
+  if (extraneous !== undefined) throw new IntegrityError(`${to} evidence field ${JSON.stringify(extraneous)} is extraneous`)
+}
+
 function plainRecord(value: unknown, name: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new IntegrityError(`${name} must be a plain object`)
   let prototype: object | null
@@ -559,16 +595,18 @@ function lifecycleView(
   taskKey: string,
   taskSlug: string,
   domain: AutonomousDomain,
-  state: AutonomousState,
+  state: AutonomousState | 'UNMAPPED',
   source: AutonomousLifecycleView['source'],
   evidence: Required<AutonomousEvidence>,
   interrupt?: AutonomousLifecycleView['interrupt'],
   integrityWarnings: readonly string[] = [],
+  providerState?: string,
 ): AutonomousLifecycleView {
-  const nextTransitions = transitions[state]
+  const nextTransitions = state === 'UNMAPPED' ? [] : transitions[state]
   return {
-    source, taskKey, taskSlug, domain, state, currentRole: roleByState[state], nextTransitions,
+    source, taskKey, taskSlug, domain, state, currentRole: state === 'UNMAPPED' ? 'unmapped' : roleByState[state], nextTransitions,
     ...(nextTransitions[0] === undefined ? {} : { nextTransition: nextTransitions[0] }),
+    ...(providerState === undefined ? {} : { providerState }),
     evidence: { ...evidence },
     ...(interrupt === undefined ? {} : { interrupt }),
     ...(integrityWarnings.length === 0 ? {} : { integrityWarnings: [...integrityWarnings] }),
@@ -577,10 +615,14 @@ function lifecycleView(
 
 function corruptView(
   identity: { readonly taskKey: string, readonly taskSlug: string },
-  state: AutonomousState,
+  state: AutonomousState | undefined,
+  providerState: string,
   warning: string,
 ): AutonomousLifecycleView {
-  return lifecycleView(identity.taskKey, identity.taskSlug, 'work', state, 'corrupt-stream', emptyEvidence(), undefined, [warning])
+  return lifecycleView(
+    identity.taskKey, identity.taskSlug, 'work', state ?? 'UNMAPPED', 'corrupt-stream', emptyEvidence(), undefined, [warning],
+    state === undefined ? providerState : undefined,
+  )
 }
 
 function sanitizeReadFailure(error: unknown): string {

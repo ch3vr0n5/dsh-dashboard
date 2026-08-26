@@ -79,4 +79,14 @@ Work the task.`, '/tmp/WORKFLOW.md', options)
     const policy = { ...DEFAULT_LIFECYCLE_POLICY, enabled: true, state_roles: { implementing: ['implementation', 'qa'] as const } }
     expect(resolveLifecyclePipeline(policy, 'Working', [], 0)).toEqual(['implementation', 'qa'])
   })
+
+  it('uses default routing for unknown provider states instead of borrowing a configured canonical role', () => {
+    const policy = {
+      ...DEFAULT_LIFECYCLE_POLICY,
+      enabled: true,
+      state_roles: { triage: ['review'] as const, 'provider custom': ['qa'] as const },
+    }
+    expect(resolveLifecyclePipeline(policy, 'Unknown Provider State', [], 0)).toEqual(['planning', 'implementation', 'qa'])
+    expect(resolveLifecyclePipeline(policy, 'Provider Custom', [], 0)).toEqual(['qa'])
+  })
 })

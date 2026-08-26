@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE,
+  AUTONOMOUS_STATES,
   migrateLegacyLifecycleState,
   projectAutonomousLifecycle,
   readControlPlaneTask,
   type AutonomousEvidence,
+  type AutonomousEvidenceField,
   type AutonomousState,
   type ControlPlaneEventRecord,
   type ControlPlaneReadAdapter,
@@ -74,6 +77,54 @@ function prPrefix(): ControlPlaneEventRecord[] {
   ]
 }
 
+function reviewPrefix(): ControlPlaneEventRecord[] {
+  return [
+    ...prPrefix(),
+    record(9, transitioned(9, 'INDEPENDENT_REVIEW', 'reviewer', {
+      headSha: shaA, reviewerId: 'reviewer', reviewId: 'review-42',
+    })),
+  ]
+}
+
+function validStreamForState(state: AutonomousState): ControlPlaneEventRecord[] {
+  const normalFlow: ControlPlaneEventRecord[] = [
+    record(1, created()),
+    record(2, transitioned(2, 'TRIAGE', 'triage')),
+    record(3, transitioned(3, 'PLANNING', 'planner')),
+    record(4, transitioned(4, 'READY', 'planner')),
+    record(5, transitioned(5, 'CLAIMED', 'claimer')),
+    record(6, transitioned(6, 'IMPLEMENTING', 'author')),
+    record(7, transitioned(7, 'LOCAL_QA', 'qa')),
+    record(8, transitioned(8, 'PR_OPEN', 'author', {
+      headSha: shaA, baseSha: shaB, pullRequestUrl: 'https://example.test/pr/42', authorId: 'author',
+    })),
+    record(9, transitioned(9, 'INDEPENDENT_REVIEW', 'reviewer', {
+      headSha: shaA, reviewerId: 'reviewer', reviewId: 'review-42',
+    })),
+    record(10, transitioned(10, 'TEST_DEPLOYED', 'reviewer', {
+      headSha: shaA, reviewerId: 'reviewer', reviewId: 'review-42', testDeploymentId: 'deploy-42',
+    })),
+    record(11, transitioned(11, 'ACCEPTANCE_QA', 'acceptance', { headSha: shaA, acceptanceId: 'acceptance-42' })),
+    record(12, transitioned(12, 'MERGE_READY', 'merge-gate', { headSha: shaA })),
+    record(13, transitioned(13, 'MERGED', 'merge-observer', { headSha: shaA })),
+    record(14, transitioned(14, 'DONE', 'completion')),
+  ]
+  const normalIndex = [
+    'IDEA', 'TRIAGE', 'PLANNING', 'READY', 'CLAIMED', 'IMPLEMENTING', 'LOCAL_QA', 'PR_OPEN',
+    'INDEPENDENT_REVIEW', 'TEST_DEPLOYED', 'ACCEPTANCE_QA', 'MERGE_READY', 'MERGED', 'DONE',
+  ].indexOf(state)
+  if (normalIndex >= 0) return normalFlow.slice(0, normalIndex + 1)
+  if (state === 'REWORK') {
+    return [...reviewPrefix(), record(10, transitioned(10, 'REWORK', 'reviewer', {
+      headSha: shaA, reviewerId: 'reviewer', reviewId: 'review-42',
+    }))]
+  }
+  if (state === 'RECOVERING' || state === 'PAUSED_CAPACITY' || state === 'WAITING_HUMAN' || state === 'FAILED_POLICY') {
+    return [...implementationPrefix(), record(7, transitioned(7, state, 'operator', { reason: `${state} reason` }))]
+  }
+  throw new Error(`missing test stream for ${state}`)
+}
+
 function project(stream: unknown) {
   return projectAutonomousLifecycle('LOCAL-42', title, 'Working', stream)
 }
@@ -84,6 +135,64 @@ describe('autonomous lifecycle strict read projection', () => {
     expect(migrateLegacyLifecycleState('Ready')).toBe('READY')
     expect(migrateLegacyLifecycleState('Working')).toBe('IMPLEMENTING')
     expect(migrateLegacyLifecycleState('User Test')).toBe('ACCEPTANCE_QA')
+    expect(migrateLegacyLifecycleState('Provider Custom State')).toBeUndefined()
+    expect(projectAutonomousLifecycle('LOCAL-42', title, 'Provider Custom State')).toMatchObject({
+      source: 'legacy-unmapped', state: 'UNMAPPED', providerState: 'Provider Custom State', currentRole: 'unmapped', nextTransitions: [],
+    })
+  })
+
+  it('defines and accepts the exact canonical evidence fields for every state', () => {
+    expect(AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE).toEqual({
+      IDEA: [], TRIAGE: [], PLANNING: [], READY: [], CLAIMED: [], IMPLEMENTING: [], LOCAL_QA: [],
+      PR_OPEN: ['headSha', 'baseSha', 'pullRequestUrl', 'authorId'],
+      INDEPENDENT_REVIEW: ['headSha', 'reviewerId', 'reviewId'],
+      REWORK: ['headSha', 'reviewerId', 'reviewId'],
+      TEST_DEPLOYED: ['headSha', 'reviewerId', 'reviewId', 'testDeploymentId'],
+      ACCEPTANCE_QA: ['headSha', 'acceptanceId'], MERGE_READY: ['headSha'], MERGED: ['headSha'], DONE: [],
+      RECOVERING: ['reason'], PAUSED_CAPACITY: ['reason'], WAITING_HUMAN: ['reason'], FAILED_POLICY: ['reason'],
+    })
+    expect(Object.keys(AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE)).toEqual(AUTONOMOUS_STATES)
+    for (const state of AUTONOMOUS_STATES) {
+      expect(project(read(validStreamForState(state))), state).toMatchObject({ source: 'control-plane', state })
+    }
+  })
+
+  it('rejects recognized evidence fields outside their target state instead of discarding them', () => {
+    const fieldValues: Readonly<Record<AutonomousEvidenceField, string>> = {
+      headSha: shaA, baseSha: shaB, pullRequestUrl: 'https://example.test/pr/42', authorId: 'author',
+      reviewerId: 'reviewer', reviewId: 'review-42', testDeploymentId: 'deploy-42',
+      acceptanceId: 'acceptance-42', reason: 'reason',
+    }
+    const fields = Object.keys(fieldValues) as AutonomousEvidenceField[]
+
+    const ideaWithEvidence = created() as unknown as { payload: Record<string, unknown> }
+    ideaWithEvidence.payload = { ...ideaWithEvidence.payload, evidence: { headSha: shaA } }
+    expect(project(read([record(1, ideaWithEvidence as unknown as ControlPlaneTaskEvent)]))).toMatchObject({ source: 'corrupt-stream' })
+
+    for (const state of AUTONOMOUS_STATES.filter(state => state !== 'IDEA')) {
+      const events = validStreamForState(state)
+      const last = events.at(-1)!
+      const extraneousFields = fields.filter(field => !AUTONOMOUS_EVIDENCE_FIELDS_BY_STATE[state].includes(field))
+      for (const extraneous of extraneousFields) {
+        const badEvent: ControlPlaneTaskEvent = {
+          ...last.event,
+          payload: { ...last.event.payload, evidence: { ...last.event.payload.evidence, [extraneous]: fieldValues[extraneous] } },
+        }
+        const bad = project(read([...events.slice(0, -1), record(last.streamVersion, badEvent)]))
+        expect(bad.source, `${state} accepted extraneous ${extraneous}`).toBe('corrupt-stream')
+        expect(bad.integrityWarnings?.[0]).toContain(`${state} evidence field \"${extraneous}\" is extraneous`)
+      }
+    }
+
+    const triageWithHead = project(read([
+      record(1, created()), record(2, transitioned(2, 'TRIAGE', 'triage', { headSha: shaA })),
+    ]))
+    expect(triageWithHead.integrityWarnings?.[0]).toContain('TRIAGE evidence field \"headSha\" is extraneous')
+    const waitingWithStaleHead = project(read([
+      ...implementationPrefix(),
+      record(7, transitioned(7, 'WAITING_HUMAN', 'operator', { reason: 'decision', headSha: shaB })),
+    ]))
+    expect(waitingWithStaleHead.integrityWarnings?.[0]).toContain('WAITING_HUMAN evidence field \"headSha\" is extraneous')
   })
 
   it('enforces the canonical order and projects exact-head evidence with separate role identities', () => {
@@ -168,7 +277,7 @@ describe('autonomous lifecycle strict read projection', () => {
         headSha: shaA, authorId: 'reviewer', reviewerId: 'reviewer', reviewId: 'review-42',
       })),
     ]))
-    expect(sameEventCollision.integrityWarnings?.[0]).toContain('same-event author and reviewer')
+    expect(sameEventCollision.integrityWarnings?.[0]).toContain('evidence field \"authorId\" is extraneous')
   })
 
   it('deduplicates identical IDs and rejects conflicts, version gaps, version drift, and timestamp disorder', () => {
@@ -209,7 +318,7 @@ describe('autonomous lifecycle strict read projection', () => {
       ...prefix, recover1,
       record(8, transitioned(8, 'IMPLEMENTING', 'author', { reason: 'must be empty' }, 'resume-bad')),
     ]))
-    expect(resumeEvidence.integrityWarnings?.[0]).toContain('empty evidence')
+    expect(resumeEvidence.integrityWarnings?.[0]).toContain('IMPLEMENTING evidence field \"reason\" is extraneous')
   })
 
   it('distinguishes a true human wait and restores its exact preserved projection on resume', () => {

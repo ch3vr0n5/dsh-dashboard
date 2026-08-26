@@ -48,8 +48,9 @@ export function resolveLifecyclePipeline(
   // Target-state routes work during a gradual migration: a legacy `Working`
   // card resolves the `IMPLEMENTING` route without changing provider-owned
   // state names or breaking existing WORKFLOW.md files.
+  const migratedState = autonomousStateForLegacyState(state)
   const requested = policy.state_roles[normalize(state)]
-    ?? policy.state_roles[normalize(autonomousStateForLegacyState(state))]
+    ?? (migratedState === undefined ? undefined : policy.state_roles[normalize(migratedState)])
     ?? ['planning', 'implementation', 'qa']
   const highRisk = new Set(policy.high_risk_labels.map(normalize))
   const highRiskIssue = labels.some(label => highRisk.has(normalize(label)))
