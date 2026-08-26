@@ -50,4 +50,25 @@ Work the task.`, '/tmp/WORKFLOW.md', options)
     expect(resolveLifecyclePipeline(policy, 'Ready', [], 2)).toEqual(['escalation', 'implementation'])
     expect(resolveLifecyclePipeline(policy, 'Review', ['security'], 0)).toEqual(['escalation'])
   })
+
+  it('routes mixed-case configured state roles through the canonical state key', () => {
+    const workflow = parseWorkflow(`---
+version: 1
+project: { name: generic, agent_profile: default }
+tracker:
+  kind: local
+  provider: { project_id: generic }
+  active_states: [Ready]
+  terminal_states: [Done]
+policy:
+  lifecycle:
+    enabled: true
+    state_roles:
+      " Ready ": [implementation, qa]
+---
+Work the task.`, '/tmp/WORKFLOW.md', options)
+
+    expect(workflow.lifecycle?.state_roles).toEqual({ ready: ['implementation', 'qa'] })
+    expect(resolveLifecyclePipeline(workflow.lifecycle!, 'READY', [], 0)).toEqual(['implementation', 'qa'])
+  })
 })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-dashboard",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "A Symphony-compatible multi-provider task orchestrator and dashboard for DeepSeek Harness",
   "keywords": [
     "ai-agent",
