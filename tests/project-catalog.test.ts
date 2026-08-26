@@ -11,6 +11,7 @@ import { dashboardCatalogDomainSpec } from '../src/catalog/spec.ts'
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   for (const path of temporaryDirectories.splice(0)) {
     await rm(path, { recursive: true, force: true })
   }
@@ -49,6 +50,40 @@ describe('ProjectCatalog', () => {
 
     await catalog.stop()
     expect(storage.close).toHaveBeenCalledOnce()
+  })
+
+  it('keeps unchanged current-workspace registration stable across restarts', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-26T08:00:00.000Z'))
+    const root = await temporaryDirectory()
+    const currentProject = join(root, 'current-project')
+    await mkdir(currentProject)
+    await writeFile(join(currentProject, 'WORKFLOW.md'), '# Project policy\n')
+    execFileSync('git', ['init', currentProject], { stdio: 'ignore', windowsHide: true })
+    const storage = memoryDomain()
+    const bootstrap = {
+      currentProject: { root: currentProject, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    } as const
+
+    const first = new ProjectCatalog(storage.context, bootstrap, root)
+    await first.start()
+    const original = first.snapshot().projects[0]!
+    const originalRepository = original.repositories[0]!
+    await first.stop()
+
+    vi.setSystemTime(new Date('2026-08-26T09:00:00.000Z'))
+    const restarted = new ProjectCatalog(storage.context, bootstrap, root)
+    await restarted.start()
+    const stable = restarted.snapshot().projects[0]!
+
+    expect(stable.id).toBe(original.id)
+    expect(stable.createdAt).toBe(original.createdAt)
+    expect(stable.updatedAt).toBe(original.updatedAt)
+    expect(stable.repositories[0]?.id).toBe(originalRepository.id)
+    expect(stable.repositories[0]?.createdAt).toBe(originalRepository.createdAt)
+    expect(stable.repositories[0]?.updatedAt).toBe(originalRepository.updatedAt)
+    await restarted.stop()
   })
 
   it('discovers only bounded candidates and requires a fresh one-use confirmation token', async () => {

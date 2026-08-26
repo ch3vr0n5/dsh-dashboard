@@ -377,13 +377,27 @@ export class ProjectCatalog {
     const timestamp = now()
     const repository = await this.upsertRepository(inspection.repository, timestamp)
     const previousRepositoryIds = existing?.repositoryIds ?? []
+    const repositoryIds = repository === undefined ? [] : [repository.id]
+    const name = requestedName ?? existing?.name ?? basename(root)
+    const workspaceStrategy = repository === undefined ? 'controlled-directory' : 'worktree'
+    if (
+      existing !== undefined
+      && existing.name === name
+      && existing.root === root
+      && existing.policyPath === inspection.policyPath
+      && sameStrings(existing.repositoryIds, repositoryIds)
+      && existing.workspaceStrategy === workspaceStrategy
+      && existing.source === source
+    ) {
+      return existing
+    }
     const project: ProjectRecord = {
       id: existing?.id ?? randomUUID(),
-      name: requestedName ?? existing?.name ?? basename(root),
+      name,
       root,
       ...(inspection.policyPath === undefined ? {} : { policyPath: inspection.policyPath }),
-      repositoryIds: repository === undefined ? [] : [repository.id],
-      workspaceStrategy: repository === undefined ? 'controlled-directory' : 'worktree',
+      repositoryIds,
+      workspaceStrategy,
       autonomousClaims: false,
       source,
       createdAt: existing?.createdAt ?? timestamp,
@@ -411,6 +425,15 @@ export class ProjectCatalog {
   ): Promise<RepositoryRecord | undefined> {
     if (inspection === undefined) return undefined
     const existing = findByPath(this.requireRepositories(), inspection.root)
+    if (
+      existing !== undefined
+      && existing.kind === inspection.kind
+      && existing.root === inspection.root
+      && existing.remoteUrl === inspection.remoteUrl
+      && existing.branch === inspection.branch
+    ) {
+      return existing
+    }
     const repository: RepositoryRecord = {
       id: existing?.id ?? randomUUID(),
       ...inspection,
@@ -490,6 +513,10 @@ export class ProjectCatalog {
       ? { strategy: 'controlled-directory', projectRoot: project.root }
       : { strategy: 'worktree', projectRoot: project.root, repositoryRoot: repository.root }
   }
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function workerSessionKey(projectId: ProjectId, issueKey: string): string {
