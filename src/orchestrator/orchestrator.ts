@@ -34,6 +34,7 @@ import {
   projectAutonomousLifecycle,
   readControlPlaneTask,
   type ControlPlaneReadAdapter,
+  type AutonomousDomain,
 } from '../lifecycle/autonomous.ts'
 
 interface RunningRecord {
@@ -60,6 +61,8 @@ export interface OrchestratorConfig {
   readonly workerHost: string
   /** Test/integration override; production defaults to the bounded v1 timeout. */
   readonly controlPlaneReadTimeoutMs?: number
+  /** Explicit tenancy domain for reads; legacy injected adapters retain work. */
+  readonly controlPlaneDomain?: AutonomousDomain
 }
 
 /** Long-lived service logic; every mutable operation is bounded to the caller plugin fiber. */
@@ -354,7 +357,7 @@ export class DashboardOrchestrator {
           taskKey: identity.taskKey,
           taskSlug: identity.taskSlug,
           taskId: `${identity.taskKey}-${identity.taskSlug}`,
-          domain: 'work',
+          domain: this.config.controlPlaneDomain ?? 'work',
         }, this.config.controlPlaneReadTimeoutMs)
         if (result.status === 'ok') read = result.read
         else {
@@ -364,7 +367,9 @@ export class DashboardOrchestrator {
       }
       return {
         ...issue,
-        autonomousLifecycle: projectAutonomousLifecycle(issue.identifier, issue.title, issue.state.name, read, readFailure),
+        autonomousLifecycle: projectAutonomousLifecycle(
+          issue.identifier, issue.title, issue.state.name, read, readFailure, this.config.controlPlaneDomain ?? 'work',
+        ),
       }
     }))
   }

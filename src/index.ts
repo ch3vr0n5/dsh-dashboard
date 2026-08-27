@@ -32,6 +32,7 @@ import { WorkflowStore } from './workflow/store.ts'
 import { providerString, providerStringMap, requireProviderString, workflowStateOrder } from './workflow/provider.ts'
 import { WorkspaceManager } from './workspace/manager.ts'
 import { resolveWorkspaceRoot } from './workspace/path-safety.ts'
+import { createControlPlaneReadAdapter } from './lifecycle/control-plane-adapter.ts'
 
 export { TaskSourceRegistry } from './task-source/index.ts'
 export type { TaskSource } from './task-source/index.ts'
@@ -46,6 +47,8 @@ export type {
   ControlPlaneTaskRead,
   ControlPlaneTaskReference,
 } from './lifecycle/autonomous.ts'
+export { createControlPlaneReadAdapter, MAX_CONTROL_PLANE_RESPONSE_BYTES } from './lifecycle/control-plane-adapter.ts'
+export type { ControlPlaneTransportConfig } from './lifecycle/control-plane-adapter.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-dashboard'
@@ -75,10 +78,32 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const asanaConfig = config.asana ?? { endpoint: 'https://app.asana.com/api/1.0', tokenRef: 'ASANA_ACCESS_TOKEN' }
   const gitlabConfig = config.gitlab ?? { endpoint: 'https://gitlab.com/api/v4', tokenRef: 'GITLAB_TOKEN' }
   const localConfig = config.local ?? { storePath: '~/.dsh-dashboard/tasks.json' }
-  const controlPlane = config.controlPlane?.readAdapter
-  const controlPlaneReader = controlPlane !== undefined && typeof controlPlane.readTask === 'function' ? controlPlane : undefined
-  if (controlPlane !== undefined && controlPlaneReader === undefined) {
-    ctx.logger.warn('dsh-dashboard: ignoring invalid control-plane read adapter')
+  const controlPlaneConfig = config.controlPlane
+  const configuredControlPlaneDomain = controlPlaneConfig?.domain
+  const controlPlaneDomain = configuredControlPlaneDomain === 'personal' || configuredControlPlaneDomain === 'work'
+    ? configuredControlPlaneDomain
+    : 'work'
+  const validControlPlaneDomain = configuredControlPlaneDomain === undefined || controlPlaneDomain === configuredControlPlaneDomain
+  const injectedControlPlane = controlPlaneConfig?.readAdapter
+  let controlPlaneReader = injectedControlPlane !== undefined && typeof injectedControlPlane.readTask === 'function' ? injectedControlPlane : undefined
+  if (injectedControlPlane !== undefined && controlPlaneReader === undefined) ctx.logger.warn('dsh-dashboard: ignoring invalid control-plane read adapter')
+  if (!validControlPlaneDomain) {
+    controlPlaneReader = undefined
+    ctx.logger.warn('dsh-dashboard: ignoring invalid control-plane domain')
+  }
+  if (validControlPlaneDomain && controlPlaneReader === undefined && controlPlaneConfig !== undefined && (controlPlaneConfig.endpoint !== undefined || controlPlaneConfig.socketPath !== undefined)) {
+    try {
+      if (controlPlaneConfig.domain === undefined) throw new Error('control-plane domain is required for configured transport')
+      controlPlaneReader = createControlPlaneReadAdapter(ctx.credentials, {
+        credentialRef: controlPlaneConfig.credentialRef ?? '',
+        domain: controlPlaneConfig.domain,
+        ...(controlPlaneConfig.endpoint === undefined ? {} : { endpoint: controlPlaneConfig.endpoint }),
+        ...(controlPlaneConfig.socketPath === undefined ? {} : { socketPath: controlPlaneConfig.socketPath }),
+        ...(controlPlaneConfig.timeoutMs === undefined ? {} : { timeoutMs: controlPlaneConfig.timeoutMs }),
+      })
+    } catch {
+      ctx.logger.warn('dsh-dashboard: ignoring invalid control-plane transport configuration')
+    }
   }
   for (const ref of [
     linearConfig.apiKeyRef,
@@ -149,6 +174,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
           permissionPreset: agentProfile.permissionPreset,
           ...(agentProfile.agentPreset === undefined ? {} : { agentPreset: agentProfile.agentPreset }),
           workerHost: agentProfile.workerHost,
+          controlPlaneDomain,
         },
         controlPlaneReader,
       )

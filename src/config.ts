@@ -3,7 +3,7 @@
 import z from '@deepseek-ai/schemastery'
 import type { LifecyclePolicy } from './lifecycle/types.ts'
 import { DEFAULT_LIFECYCLE_POLICY } from './lifecycle/policy.ts'
-import type { ControlPlaneReadAdapter } from './lifecycle/autonomous.ts'
+import type { AutonomousDomain, ControlPlaneReadAdapter } from './lifecycle/autonomous.ts'
 
 export interface CurrentProjectConfig {
   /** Project root, resolved from the Harness process working directory. */
@@ -51,7 +51,18 @@ export interface Config {
    * a reconciliation or merge capability through this configuration.
    */
   controlPlane: {
-    readAdapter: ControlPlaneReadAdapter
+    /** Optional injection seam retained for tests and trusted host extensions. */
+    readAdapter?: ControlPlaneReadAdapter
+    /** Configured transport domain; defaults to work only for legacy injected adapters. */
+    domain?: AutonomousDomain
+    /** HTTPS base endpoint, mutually exclusive with socketPath. */
+    endpoint?: string
+    /** Absolute Unix-domain HTTP socket path, mutually exclusive with endpoint. */
+    socketPath?: string
+    /** Harness credential reference resolved for each control-plane read. */
+    credentialRef?: string
+    /** Optional bounded transport timeout in milliseconds. */
+    timeoutMs?: number
   } | undefined
   discovery: {
     /** Explicit roots seeded into the Catalog; every scanned candidate still requires confirmation. */
