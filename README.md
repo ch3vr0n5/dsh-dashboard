@@ -59,7 +59,7 @@ The Host plugin owns provider access, scheduling, workspaces, hooks, Agent sessi
 
 ### Autonomous lifecycle read integration
 
-Dashboard accepts the reviewed `control-plane/v1` lifecycle only through its exported, read-only `ControlPlaneReadAdapter`, supplied as `controlPlane.readAdapter` in host configuration. The adapter supplies an exact task stream as `{ version, events: [{ streamVersion, event }] }`; Dashboard strictly verifies stream order, event identity, contract shape, legal transitions, exact-head evidence, and role separation before projecting it. Each task read receives an `AbortSignal` and a hard timeout. Missing streams use migration aliases, while failed or corrupt supplied streams display an integrity warning with empty evidence. Dashboard never reconciles commands, admits work, executes merges, or enables auto-merge. The supported target states are `IDEA`, `TRIAGE`, `PLANNING`, `READY`, `CLAIMED`, `IMPLEMENTING`, `LOCAL_QA`, `PR_OPEN`, `INDEPENDENT_REVIEW`, `REWORK`, `TEST_DEPLOYED`, `ACCEPTANCE_QA`, `MERGE_READY`, `MERGED`, `DONE`, `RECOVERING`, `PAUSED_CAPACITY`, `WAITING_HUMAN`, and `FAILED_POLICY`. Without an adapter, existing provider and Local cards remain available and use stable aliases such as `Backlog → IDEA`, `Ready → READY`, `Working → IMPLEMENTING`, and `User Test → ACCEPTANCE_QA`.
+Dashboard accepts the reviewed `control-plane/v1` lifecycle through a read-only adapter. Hosts can retain the programmatic `controlPlane.readAdapter` seam for tests and trusted extensions, or configure a production adapter with one HTTPS base endpoint or one absolute Unix socket path, a Harness `credentialRef`, and an explicit `personal` or `work` domain. The configured adapter performs only `GET /control-plane/v1/tasks/{taskId}`, resolves the credential for each request, sends it only as a Bearer header, and has no write method. HTTPS endpoints must not contain URL credentials, a query, or a fragment; socket paths never create a TCP listener. Responses must be HTTP 200 with exactly `application/json`, are bounded to 1 MiB and 2 seconds by default, and are passed unchanged to the exact stream projector. The projector strictly verifies stream order, event identity, contract shape, legal transitions, exact-head evidence, domain isolation, and role separation. Missing streams use migration aliases, while failed or corrupt supplied streams display an integrity warning with empty evidence. Dashboard never reconciles commands, admits work, executes merges, or enables auto-merge. The supported target states are `IDEA`, `TRIAGE`, `PLANNING`, `READY`, `CLAIMED`, `IMPLEMENTING`, `LOCAL_QA`, `PR_OPEN`, `INDEPENDENT_REVIEW`, `REWORK`, `TEST_DEPLOYED`, `ACCEPTANCE_QA`, `MERGE_READY`, `MERGED`, `DONE`, `RECOVERING`, `PAUSED_CAPACITY`, `WAITING_HUMAN`, and `FAILED_POLICY`. Without an adapter, existing provider and Local cards remain available and use stable aliases such as `Backlog → IDEA`, `Ready → READY`, `Working → IMPLEMENTING`, and `User Test → ACCEPTANCE_QA`.
 
 The card inspector exposes the control-plane state, current role, next transition, descriptive task key/slug, exact-head evidence, distinct author/reviewer identities, recovery metadata, and explicit `WAITING_HUMAN` interrupts. PostgreSQL event-store CAS, capacity admission, notifications, and deterministic merge-gate execution remain external integration responsibilities.
 
@@ -135,6 +135,9 @@ The package provides a standard `dsh.bundle.patch`; defaults live in [cordis.pat
 | `asana.endpoint` / `asana.tokenRef` | Asana REST endpoint and token reference. |
 | `gitlab.endpoint` / `gitlab.tokenRef` | GitLab API v4 endpoint and token reference. Override the endpoint for self-managed GitLab. |
 | `local.storePath` | Host-side JSON task store. Defaults to `~/.dsh-dashboard/tasks.json`. |
+| `controlPlane.domain` | Required `personal` or `work` domain for configured control-plane transport. It is the only domain whose stream is projected. |
+| `controlPlane.endpoint` / `controlPlane.socketPath` | Exactly one transport: an HTTPS base endpoint, or an absolute Unix-domain HTTP socket path. Endpoint URLs may not contain credentials, query, or fragment. |
+| `controlPlane.credentialRef` / `controlPlane.timeoutMs` | Harness credential reference used per GET request, and optional 1–30,000 ms transport timeout (default 2,000 ms). |
 
 Example Web profile override:
 
@@ -171,6 +174,11 @@ Example Web profile override:
       endpoint: https://gitlab.example.com/api/v4
     local:
       storePath: C:\work\dsh-dashboard\tasks.json
+    controlPlane:
+      domain: work
+      endpoint: https://control-plane.example.com
+      credentialRef: CONTROL_PLANE_READ_TOKEN
+      timeoutMs: 2000
 ```
 
 `agentProfile.permissionPreset` is deliberately explicit: unattended orchestration must never silently select or elevate a sandbox or approval policy. Project discovery does not authorize execution; every stored Project has autonomous claims disabled.

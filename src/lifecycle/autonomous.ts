@@ -231,24 +231,25 @@ export function projectAutonomousLifecycle(
   legacyState: string,
   read?: unknown,
   readFailure?: string,
+  expectedDomain: AutonomousDomain = 'work',
 ): AutonomousLifecycleView {
   const identity = autonomousTaskIdentity(identifier, title)
   const expectedTaskId = `${identity.taskKey}-${identity.taskSlug}`
   const legacyStateValue = autonomousStateForLegacyState(legacyState)
-  if (readFailure !== undefined) return corruptView(identity, legacyStateValue, legacyState, readFailure)
+  if (readFailure !== undefined) return corruptView(identity, legacyStateValue, legacyState, readFailure, expectedDomain)
   if (read === undefined) {
     return legacyStateValue === undefined
-      ? lifecycleView(identity.taskKey, identity.taskSlug, 'work', 'UNMAPPED', 'legacy-unmapped', emptyEvidence(), undefined, [], legacyState)
-      : lifecycleView(identity.taskKey, identity.taskSlug, 'work', legacyStateValue, 'legacy-alias', emptyEvidence())
+      ? lifecycleView(identity.taskKey, identity.taskSlug, expectedDomain, 'UNMAPPED', 'legacy-unmapped', emptyEvidence(), undefined, [], legacyState)
+      : lifecycleView(identity.taskKey, identity.taskSlug, expectedDomain, legacyStateValue, 'legacy-alias', emptyEvidence())
   }
   try {
-    const aggregate = verifyAndProjectRead(read, expectedTaskId, 'work')
+    const aggregate = verifyAndProjectRead(read, expectedTaskId, expectedDomain)
     return lifecycleView(
       expectedTaskId, identity.taskSlug, aggregate.domain, aggregate.projection.state,
       'control-plane', aggregate.projection.evidence, interruptFor(aggregate.projection),
     )
   } catch (error) {
-    return corruptView(identity, legacyStateValue, legacyState, integrityMessage(error))
+    return corruptView(identity, legacyStateValue, legacyState, integrityMessage(error), expectedDomain)
   }
 }
 
@@ -618,9 +619,10 @@ function corruptView(
   state: AutonomousState | undefined,
   providerState: string,
   warning: string,
+  domain: AutonomousDomain,
 ): AutonomousLifecycleView {
   return lifecycleView(
-    identity.taskKey, identity.taskSlug, 'work', state ?? 'UNMAPPED', 'corrupt-stream', emptyEvidence(), undefined, [warning],
+    identity.taskKey, identity.taskSlug, domain, state ?? 'UNMAPPED', 'corrupt-stream', emptyEvidence(), undefined, [warning],
     state === undefined ? providerState : undefined,
   )
 }
