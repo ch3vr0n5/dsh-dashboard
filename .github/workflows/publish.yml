@@ -76,7 +76,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/release"
           pnpm pack --pack-destination "$RUNNER_TEMP/release"
-          npm sbom --omit=dev --sbom-format cyclonedx > "$RUNNER_TEMP/release/dsh-dashboard-${PACKAGE_VERSION}.cdx.json"
+          pnpm --filter dsh-dashboard --prod deploy --legacy "$RUNNER_TEMP/sbom-tree"
+          (cd "$RUNNER_TEMP/sbom-tree" && npm sbom --omit=dev --sbom-format cyclonedx) > "$RUNNER_TEMP/release/dsh-dashboard-${PACKAGE_VERSION}.cdx.json"
           (cd "$RUNNER_TEMP/release" && sha256sum ./* > SHA256SUMS)
 
       - name: Publish immutable GitHub release artifacts
