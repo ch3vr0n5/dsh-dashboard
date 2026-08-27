@@ -95,3 +95,4 @@ jobs:
               --verify-tag \
               --title "dsh-dashboard ${PACKAGE_VERSION}" \
               --notes "Exact package, CycloneDX SBOM, and SHA-256 manifest for ${RELEASE_TAG}."
+          fi
