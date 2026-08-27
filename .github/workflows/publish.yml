@@ -1,13 +1,18 @@
-name: Publish npm package
+name: Publish GitHub package
 
 on:
+  workflow_dispatch:
+    inputs:
+      releaseTag:
+        description: Existing exact source tag to package
+        required: true
+        type: string
   push:
     tags:
       - "v*"
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
 
 concurrency:
   group: npm-publish-${{ github.ref }}
@@ -22,6 +27,8 @@ jobs:
     steps:
       - name: Check out the release tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ inputs.releaseTag || github.ref_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -40,11 +47,18 @@ jobs:
         run: |
           package_version="$(node --print "require('./package.json').version")"
           expected_tag="v${package_version}"
-
-          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match package version ${package_version}." >&2
+          release_tag="${{ inputs.releaseTag || github.ref_name }}"
+          checked_out_tag="$(git describe --tags --exact-match HEAD)"
+          if [[ "${release_tag}" != "${expected_tag}" ]]; then
+            echo "Tag ${release_tag} does not match package version ${package_version}." >&2
             exit 1
           fi
+          if [[ "${checked_out_tag}" != "${release_tag}" ]]; then
+            echo "Checked-out tag ${checked_out_tag} does not match requested tag ${release_tag}." >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=${release_tag}" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERSION=${package_version}" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -58,5 +72,21 @@ jobs:
       - name: Build package
         run: pnpm run build
 
-      - name: Publish to npm
-        run: npm publish --access public
+      - name: Build package artifacts
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          pnpm pack --pack-destination "$RUNNER_TEMP/release"
+          npm sbom --omit=dev --sbom-format cyclonedx > "$RUNNER_TEMP/release/dsh-dashboard-${PACKAGE_VERSION}.cdx.json"
+          (cd "$RUNNER_TEMP/release" && sha256sum ./* > SHA256SUMS)
+
+      - name: Publish immutable GitHub release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$RUNNER_TEMP/release"/* --clobber
+          else
+            gh release create "$RELEASE_TAG" "$RUNNER_TEMP/release"/* \
+              --verify-tag \
+              --title "dsh-dashboard ${PACKAGE_VERSION}" \
+              --notes "Exact package, CycloneDX SBOM, and SHA-256 manifest for ${RELEASE_TAG}."
