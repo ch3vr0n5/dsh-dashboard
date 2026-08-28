@@ -69,6 +69,15 @@ export const inject = [
 /** Public plugin configuration schema. */
 export const Config = ConfigSchema
 
+/** Select the durable Catalog record that owns the singleton workspace alias. */
+export function configuredWorkspaceProjectId(
+  projects: readonly Pick<ProjectRecord, 'id' | 'root' | 'source'>[],
+  currentProjectRoot: string,
+  fallback = 'current-workspace',
+): string {
+  return projects.find(project => project.source === 'current-workspace' && project.root === currentProjectRoot)?.id ?? fallback
+}
+
 /** Compose built-in providers, the orchestrator, and trusted client RPC. */
 export function apply(ctx: Context, config: PluginConfig): void {
   const agentProfile = config.agentProfile
@@ -138,6 +147,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
     updatedAt: timestamp,
   }
   const providerConfigs = { linearConfig, githubConfig, jiraConfig, asanaConfig, gitlabConfig, localConfig }
+  // `current-workspace` is a singleton integration scope. Resolve its one
+  // durable owner after Catalog startup; a source label is not ownership
+  // because stale/duplicate Catalog records may carry the same label.
+  let currentWorkspaceProjectId = initialProject.id
   const runtime = new DashboardRuntimeCoordinator(ctx, catalog, {
     initialProject,
     parseOptions: { defaults: config.policyDefaults, lifecycleDefaults: config.lifecycleDefaults, agentProfile },
@@ -146,8 +159,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
       const disposeScopeAliases: Array<() => void> = []
       let disposeSources: () => void
       try {
-        disposeScopeAliases.push(sourceRegistry.aliasScope(`project:${project.name}`, project.id))
-        if (project.source === 'current-workspace') {
+        // Project names are display labels and are not unique Catalog keys.
+        // Keep the integration alias tied to the durable id so global setup
+        // cannot route a duplicate name to whichever runtime wins a race.
+        disposeScopeAliases.push(sourceRegistry.aliasScope(`project:${project.id}`, project.id))
+        if (project.id === currentWorkspaceProjectId) {
           disposeScopeAliases.push(sourceRegistry.aliasScope('current-workspace', project.id))
         }
         disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)
@@ -190,6 +206,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
   let disposed = false
   const startup = catalog.start().then(async () => {
     if (disposed) return
+    currentWorkspaceProjectId = configuredWorkspaceProjectId(catalog.snapshot().projects, currentProjectRoot, initialProject.id)
     await runtime.start()
   })
 

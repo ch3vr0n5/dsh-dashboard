@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
+import { configuredWorkspaceProjectId } from '../src/index.ts'
 import type { TaskSource } from '../src/task-source/index.ts'
 import { resolveTaskSourceAgentTool, TaskSourceRegistry } from '../src/task-source/index.ts'
 
@@ -24,6 +25,34 @@ describe('TaskSource Agent tool compatibility', () => {
 })
 
 describe('TaskSourceRegistry workspace aliases', () => {
+  it('gives the singleton workspace alias one owner during global context setup', () => {
+    const registry = new TaskSourceRegistry(new Context())
+    const projects = [
+      project('configured', 'workspace', '/workspace', 'current-workspace'),
+      project('stale-current', 'workspace', '/old-workspace', 'current-workspace'),
+      project('manual', 'workspace', '/other-workspace', 'manual'),
+    ]
+    const owner = configuredWorkspaceProjectId(projects, '/workspace')
+    const sources = new Map(projects.map(project => [project.id, registry.scope(project.id).register(stubSource('local'))]))
+    const disposers = projects.map(project => {
+      const disposeProject = registry.aliasScope(`project:${project.id}`, project.id)
+      const disposeWorkspace = project.id === owner
+        ? registry.aliasScope('current-workspace', project.id)
+        : () => undefined
+      return () => { disposeWorkspace(); disposeProject() }
+    })
+
+    expect(registry.requireScoped('current-workspace', 'local')).toBeDefined()
+    expect(registry.requireScoped('current-workspace', 'local')).toBe(registry.requireScoped(owner, 'local'))
+    expect(registry.requireScoped('project:configured', 'local')).toBe(registry.requireScoped('configured', 'local'))
+    expect(registry.requireScoped('project:stale-current', 'local')).toBe(registry.requireScoped('stale-current', 'local'))
+    expect(registry.scopeIds).not.toContain('project:workspace')
+    expect(registry.scopeIds).toContain('current-workspace')
+
+    for (const dispose of disposers.toReversed()) dispose()
+    for (const dispose of sources.values()) dispose()
+  })
+
   it('resolves the stable current-workspace scope to a durable Catalog project id', () => {
     const registry = new TaskSourceRegistry(new Context())
     const source = stubSource('local')
@@ -57,4 +86,13 @@ function stubSource(kind: string): TaskSource {
     listIssuesByStates: async () => [],
     getIssuesByNativeRefs: async () => [],
   }
+}
+
+function project(id: string, name: string, root: string, source: 'current-workspace' | 'manual'): {
+  readonly id: string
+  readonly name: string
+  readonly root: string
+  readonly source: 'current-workspace' | 'manual'
+} {
+  return { id, name, root, source }
 }
