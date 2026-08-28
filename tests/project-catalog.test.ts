@@ -86,6 +86,40 @@ describe('ProjectCatalog', () => {
     await restarted.stop()
   })
 
+  it('keeps one current-workspace source when a profile moves to a new root', async () => {
+    const root = await temporaryDirectory()
+    const previousRoot = join(root, 'workspace')
+    const currentRoot = join(previousRoot, 'current-project')
+    await mkdir(currentRoot, { recursive: true })
+    await writeFile(join(previousRoot, 'WORKFLOW.md'), '# Previous policy\n')
+    await writeFile(join(currentRoot, 'WORKFLOW.md'), '# Current policy\n')
+    const storage = memoryDomain()
+
+    const previous = new ProjectCatalog(storage.context, {
+      currentProject: { root: previousRoot, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    }, root)
+    await previous.start()
+    const previousId = previous.snapshot().projects[0]!.id
+    await previous.stop()
+
+    const moved = new ProjectCatalog(storage.context, {
+      currentProject: { root: currentRoot, policyPath: 'WORKFLOW.md', registerInCatalog: true },
+      discoveryRoots: [],
+    }, root)
+    await moved.start()
+    const projects = moved.snapshot().projects
+
+    expect(projects).toHaveLength(2)
+    expect(projects.filter(project => project.source === 'current-workspace')).toHaveLength(1)
+    expect(projects.find(project => project.root === currentRoot)).toMatchObject({ source: 'current-workspace' })
+    expect(projects.find(project => project.id === previousId)).toMatchObject({
+      root: previousRoot,
+      source: 'manual',
+    })
+    await moved.stop()
+  })
+
   it('discovers only bounded candidates and requires a fresh one-use confirmation token', async () => {
     const root = await temporaryDirectory()
     const currentProject = join(root, 'current-project')

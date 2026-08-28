@@ -143,14 +143,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
     parseOptions: { defaults: config.policyDefaults, lifecycleDefaults: config.lifecycleDefaults, agentProfile },
     createRuntime: (project, workflow) => {
       const sources = sourceRegistry.scope(project.id)
-      const disposeScopeAliases = [
-        sourceRegistry.aliasScope(`project:${project.name}`, project.id),
-        ...(project.source === 'current-workspace'
-          ? [sourceRegistry.aliasScope('current-workspace', project.id)]
-          : []),
-      ]
+      const disposeScopeAliases: Array<() => void> = []
       let disposeSources: () => void
       try {
+        disposeScopeAliases.push(sourceRegistry.aliasScope(`project:${project.name}`, project.id))
+        if (project.source === 'current-workspace') {
+          disposeScopeAliases.push(sourceRegistry.aliasScope('current-workspace', project.id))
+        }
         disposeSources = registerProjectSources(ctx, sources, workflow, providerConfigs)
       } catch (error) {
         for (const dispose of disposeScopeAliases.toReversed()) dispose()

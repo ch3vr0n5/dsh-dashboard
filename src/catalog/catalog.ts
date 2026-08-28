@@ -100,6 +100,7 @@ export class ProjectCatalog {
       let bootstrapProject: ProjectRecord | undefined
       if (this.bootstrap.currentProject.registerInCatalog) {
         bootstrapProject = await this.enqueueMutation(async () => {
+          await this.reconcileCurrentWorkspaceSource(currentRoot)
           return await this.registerDirectory(
             currentRoot,
             undefined,
@@ -120,6 +121,23 @@ export class ProjectCatalog {
     } catch (error) {
       await this.stop()
       throw error
+    }
+  }
+
+  /**
+   * A profile may move its configured current workspace while retaining the
+   * same durable Catalog. Keep the old project, but retire its singleton
+   * current-workspace role before promoting the newly configured root.
+   */
+  private async reconcileCurrentWorkspaceSource(currentRoot: string): Promise<void> {
+    const timestamp = now()
+    for (const [id, project] of this.requireProjects().entries()) {
+      if (project.source !== 'current-workspace' || project.root === currentRoot) continue
+      await this.requireProjects().put(id, {
+        ...project,
+        source: 'manual',
+        updatedAt: timestamp,
+      })
     }
   }
 
